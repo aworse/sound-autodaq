@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLASSISM Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <div class="topbar plate">
+    <div class="ident">CLASSISM &nbsp;DATA&nbsp;ACQUISITION</div>
+    <div class="id-field">P/N <b id="participant">--</b> &nbsp;&nbsp; SCN <b id="scenario">--</b> &nbsp;&nbsp; SES <b id="session">--</b></div>
+    <div><span class="conn-dot off" id="conn-dot"></span><span id="conn-text">OFFLINE</span></div>
+  </div>
+
+  <div class="instruments">
+    <div class="gauge-panel plate">
+      <div class="gauge-label">OVERALL PROGRESS</div>
+      <div class="dial" id="overall-dial">
+        <div class="readout">
+          <div class="pct" id="overall-pct">0%</div>
+          <div class="frac" id="overall-frac">0 / 0</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="center-panel plate">
+      <div class="target-frame">
+        <div class="target-glyph idle" id="target-glyph">-</div>
+      </div>
+      <div class="next-row">NEXT <span class="glyph" id="next-glyph">-</span></div>
+      <div class="status-strip idle" id="status-strip">IDLE</div>
+    </div>
+
+    <div class="gauge-panel plate">
+      <div class="gauge-label">CURRENT CLASS</div>
+      <div class="dial" id="class-dial" style="--color: var(--amber)">
+        <div class="readout">
+          <div class="pct" id="class-pct">0%</div>
+          <div class="frac" id="class-frac">0 / 0</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bottombar">
+    <div class="clocks plate">
+      <div class="clock-row"><span class="lbl">ELAPSED</span><span class="val" id="elapsed">00:00:00</span></div>
+      <div class="clock-row"><span class="lbl">REMAINING (EST)</span><span class="val" id="remaining">--:--:--</span></div>
+      <div class="clock-row"><span class="lbl">SEED / STRATEGY</span><span class="val" id="seed-strategy" style="font-size:13px">--</span></div>
+    </div>
+
+    <div class="vu plate">
+      <div class="vu-row"><span class="lbl">PEAK</span><div class="vu-track"><div class="vu-fill" id="peak-bar"></div></div></div>
+      <div class="vu-row"><span class="lbl">RMS</span><div class="vu-track"><div class="vu-fill" id="rms-bar"></div></div></div>
+      <div class="vu-row"><span class="lbl">CLIP</span><div class="vu-track"><div class="vu-fill" id="clip-bar"></div></div></div>
+    </div>
+
+    <div class="annunciators plate">
+      <div class="lamp" id="lamp-overflow">OVERFLOW</div>
+      <div class="lamp" id="lamp-clipping">CLIPPING</div>
+      <div class="lamp" id="lamp-silence">SILENCE</div>
+      <div class="lamp" id="lamp-complete">COMPLETE</div>
+    </div>
+  </div>
+
+<script src="/app.js"></script>
+</body>
+</html>

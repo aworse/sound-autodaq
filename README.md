@@ -27,6 +27,7 @@ experiments/recording/     the recorder (this spec's normative subject)
   validator.py                read-only dataset validation
   engine.py                   session orchestration
   cli.py, __main__.py         command-line interface
+  webui/                       optional browser dashboard (read-only status viewer)
   tests/                      unit + hardware-free integration tests
 ```
 
@@ -52,6 +53,12 @@ python -m experiments.recording --list-devices
 
 # validate a recorded dataset (read-only, no hardware needed)
 python -m experiments.recording --validate data/raw/P01/S01/SESSION01
+
+# browser dashboard: live status view of a session directory
+# (read-only, polls the same files the recorder writes; run alongside
+# --config/--resume in another terminal, or point it at a finished session)
+python -m experiments.recording --dashboard data/raw/P01/S01/SESSION01 --port 8765
+# then open http://127.0.0.1:8765
 ```
 
 ## Tests
