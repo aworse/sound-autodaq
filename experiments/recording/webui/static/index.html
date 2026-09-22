@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLASSISM Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <div class="meta">
+    <span id="participant">--</span> /
+    <span id="scenario">--</span> /
+    <span id="session">--</span>
+  </div>
+
+  <div class="main">
+    <div class="glyph" id="target-glyph">-</div>
+    <div class="status" id="status-strip">idle</div>
+    <div class="progress" id="overall-frac">0 / 0</div>
+    <div class="next">next: <span id="next-glyph">-</span></div>
+  </div>
+
+  <div class="footer">
+    <span id="elapsed">00:00:00</span> elapsed ·
+    <span id="remaining">--:--:--</span> remaining
+  </div>
+
+<script src="/app.js"></script>
+</body>
+</html>

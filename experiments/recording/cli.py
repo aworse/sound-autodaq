@@ -129,6 +129,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    from .webui.server import serve
+
+    serve(Path(args.dashboard), host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m experiments.recording")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -137,11 +144,14 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--mic-test", action="store_true")
     group.add_argument("--validate", help="path to a session directory to validate")
     group.add_argument("--list-devices", action="store_true")
+    group.add_argument("--dashboard", help="path to a session directory to view live in a browser")
 
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--device", default=None)
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=1)
+    parser.add_argument("--host", default="127.0.0.1", help="dashboard bind host")
+    parser.add_argument("--port", type=int, default=8765, help="dashboard bind port")
     return parser
 
 
@@ -156,6 +166,8 @@ def main(argv=None) -> int:
             return cmd_list_devices(args)
         if args.validate:
             return cmd_validate(args)
+        if args.dashboard:
+            return cmd_dashboard(args)
         return cmd_run(args)
     except RecorderError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
