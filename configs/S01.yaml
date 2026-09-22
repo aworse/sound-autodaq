@@ -1,0 +1,82 @@
+experiment:
+  name: classism_acoustic_collection
+  config_version: "1"
+
+participant:
+  id: P01
+
+scenario:
+  id: S01
+  name: quiet_room
+  description: "Closed room, HVAC off, no other occupants"
+
+session:
+  id: SESSION01
+
+recording:
+  device: null
+  sample_rate: 48000
+  channels: 1
+  format: PCM_16
+  allow_resample: false
+
+trial:
+  repetitions_per_class: 500
+  countdown_ms: 1000
+  pre_roll_ms: 500
+  input_window_ms: 500
+  post_roll_ms: 500
+  inter_trial_ms: 500
+
+input:
+  mode: human
+
+randomization:
+  strategy: balanced_random
+  seed: 20260922
+  block_size: null
+  manual_order_file: null
+
+controls:
+  allow_repeat: true
+  allow_skip: true
+  allow_pause: true
+  repeat_on_invalid: true
+  resume_policy: discard_current
+
+break:
+  enabled: true
+  every_trials: 500
+  duration_seconds: 60
+
+quality:
+  clipping_threshold: 0.001
+  silence_rms_threshold: 0.001
+  max_consecutive_failures: 3
+
+output:
+  root: data/raw
+  duplicate_policy: error
+  progress_flush_every: 1
+
+hardware:
+  keyboard:
+    keyboard_id: KB01
+    keyboard_model: unknown
+    keyboard_type: unknown
+    switch_type: unknown
+    layout: dubeolsik
+  microphone:
+    microphone_id: MIC01
+    microphone_model: unknown
+    placement: unknown
+    distance_cm: null
+    orientation: unknown
+
+environment:
+  room_id: unknown
+  background_noise: unknown
+  air_conditioner: false
+  fan: false
+  other_devices: []
+  background_db: null
