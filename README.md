@@ -61,6 +61,66 @@ python -m experiments.recording --dashboard data/raw/P01/S01/SESSION01 --port 87
 # then open http://127.0.0.1:8765
 ```
 
+Exit status: `0` when the session completes and validates, and also
+when the operator stops it with `0`/Ctrl+C (REQ-29.3). In that case the
+console says `SESSION INCOMPLETE` and prints the resume command; a stop
+is never reported as a complete session (REQ-46.2). `1` for errors and
+validation failures.
+
+## Operator controls
+
+Type these digits into the recorder's terminal:
+
+| key | action |
+| --- | --- |
+| `1` | repeat: mark this trial invalid and re-record it immediately under a new trial id |
+| `2` | skip: keep the audio, mark `skipped`, do not re-record |
+| `3` | invalid: mark `operator_marked_invalid`, re-record at the end of the session |
+| `4` | pause / resume |
+| `0` | quit safely after the current trial |
+
+A key applies to the trial on screen: the one in countdown, recording,
+or the gap right after it.
+
+**Deviation from REQ-28.1 (written justification):** the spec names
+SPACE/R/S/I/Q. On a dubeolsik keyboard R, S, I and Q are the keys for ㄱ,
+ㄴ, ㅑ and ㅂ. Those are target classes, so a participant typing ㅂ with
+the IME in Latin mode would end the session. REQ-28.2 (controls must not
+collide with experimental keystrokes) takes precedence under the §2.7
+priority order, so the controls are digits. Letter, jamo and space keys
+typed into the terminal are ignored.
+
+## Class definition: placeholder
+
+`classism/labels.py` is a **stand-in**. The real classism class
+definition (38 classes per the spec) was not available here. The
+placeholder lists only the 33 jamo a single dubeolsik keystroke can
+produce: 19 consonants including the Shift doubles, and 14 vowels
+including ㅒ/ㅖ. Compound vowels such as ㅘ need two keystrokes and are
+excluded. Drop the project's real `labels.py` in before collecting
+training data. Nothing else changes, because the recorder derives the
+class count from `len(CLASSES)`.
+
+## Implementation decisions (spec Appendix E)
+
+These are also written into every `session.json` under
+`implementation_decisions`:
+
+- **E.1 keystroke detection:** none. The input window is time-based, and
+  `input_detected_ns` / `observed_label` are always null.
+- **E.3 re-queue placement:** repeat and pause-discard re-record
+  immediately. Invalid, silent, overflowed and corrupted trials go to the
+  end of the session (when `repeat_on_invalid` is true). Skipped trials
+  are never re-recorded. A failure streak of
+  `quality.max_consecutive_failures` stops the session safely.
+- **E.4 audio backend:** sounddevice/PortAudio at int16. The native
+  sample rate is verified before opening, with no software resampling.
+- **E.5 manual order file:** a JSON list of `{"label", "repetition"}`
+  objects.
+- `input.mode: automated` is rejected at pre-flight. This recorder
+  cannot synthesize key events, and it will not record human keystrokes
+  under an `automated` label.
+
 ## Tests
 
 ```bash

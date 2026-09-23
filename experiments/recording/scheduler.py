@@ -9,7 +9,6 @@ Never: audio, UI, WAV (REQ-57).
 from __future__ import annotations
 
 import dataclasses
-import heapq
 import json
 import random
 from pathlib import Path
@@ -93,56 +92,54 @@ def _strategy_random(pool_by_label: dict, rng: random.Random, **_kwargs) -> list
     return flat
 
 
+def _repair_adjacent_repeats(seq: list, rng: random.Random) -> None:
+    """Swap away any position whose label equals its predecessor's, in
+    place, choosing the swap partner by a seeded random scan so the fix
+    introduces no structure of its own."""
+    n = len(seq)
+
+    def label(i):
+        return seq[i][0] if 0 <= i < n else None
+
+    for i in range(1, n):
+        if label(i) != label(i - 1):
+            continue
+        start = rng.randrange(n)
+        for step in range(n):
+            j = (start + step) % n
+            if abs(j - i) <= 1:
+                continue
+            a, b = seq[i], seq[j]
+            # After the swap, b sits at i and a sits at j; neither may
+            # match its new neighbours.
+            if b[0] in (label(i - 1), label(i + 1)):
+                continue
+            if a[0] in (label(j - 1), label(j + 1)):
+                continue
+            seq[i], seq[j] = b, a
+            break
+
+
 @register_strategy("balanced_random")
 def _strategy_balanced_random(pool_by_label: dict, rng: random.Random, **_kwargs) -> list:
-    """Exact per-class counts (guaranteed by pool construction), then a
-    global reordering that never places two trials of the same class back
-    to back (REQ-10.1), via a randomized largest-remaining-count merge.
+    """Exact per-class counts (guaranteed by pool construction), then one
+    uniform global permutation, then a repair pass so no class is ever
+    scheduled twice in a row (REQ-10.1). A global permutation — unlike a
+    round-robin — gives no fixed-size window in which the remaining
+    classes become predictable to the participant.
     """
-    remaining = {label: list(items) for label, items in pool_by_label.items()}
-    for items in remaining.values():
-        rng.shuffle(items)
-
-    heap = []
-    for label, items in remaining.items():
-        if items:
-            heapq.heappush(heap, (-len(items), rng.random(), label))
-
-    result: list = []
-    prev_label: Optional[str] = None
-    deferred = None  # (neg_count, tiebreak, label) temporarily set aside
-
-    while heap or deferred:
-        if deferred is not None:
-            heapq.heappush(heap, deferred)
-            deferred = None
-
-        neg_count, _tie, label = heapq.heappop(heap)
-        if label == prev_label:
-            if not heap:
-                # Only one class has items left; a same-class run is
-                # unavoidable (shouldn't happen for a balanced multi-class
-                # pool, but never crash on it).
-                heapq.heappush(heap, (neg_count, rng.random(), label))
-            else:
-                deferred = (neg_count, rng.random(), label)
-                neg_count, _tie, label = heapq.heappop(heap)
-
-        item = remaining[label].pop()
-        result.append(item)
-        count = -neg_count - 1
-        if count > 0:
-            heapq.heappush(heap, (-count, rng.random(), label))
-        prev_label = label
-
-    return result
+    flat = [item for items in pool_by_label.values() for item in items]
+    rng.shuffle(flat)
+    _repair_adjacent_repeats(flat, rng)
+    return flat
 
 
 @register_strategy("block_random")
 def _strategy_block_random(pool_by_label: dict, rng: random.Random, block_size: int, **_kwargs) -> list:
-    """Balanced within blocks of `block_size` trials: each block is filled
-    by round-robin sampling across classes (so class share stays even
-    within the block), then shuffled internally.
+    """Balanced within blocks of `block_size` trials. Each block draws one
+    item per class in order of most-remaining-first (random tie-break), so
+    every class is drawn down at the same rate and none is pushed to the
+    end of the session (REQ-10.5), then the block is shuffled internally.
     """
     if not block_size or block_size <= 0:
         raise ScheduleError("block_random requires a positive block_size")
@@ -151,18 +148,20 @@ def _strategy_block_random(pool_by_label: dict, rng: random.Random, block_size: 
     for items in remaining.values():
         rng.shuffle(items)
 
-    labels_cycle = sorted(remaining)
     result: list = []
     while any(remaining.values()):
         block: list = []
-        idx = 0
-        active = [l for l in labels_cycle if remaining[l]]
-        while len(block) < block_size and active:
-            label = active[idx % len(active)]
-            if remaining[label]:
+        while len(block) < block_size:
+            order = sorted(
+                (l for l in remaining if remaining[l]),
+                key=lambda l: (-len(remaining[l]), rng.random()),
+            )
+            if not order:
+                break
+            for label in order:
+                if len(block) >= block_size:
+                    break
                 block.append(remaining[label].pop())
-                idx += 1
-            active = [l for l in labels_cycle if remaining[l]]
         rng.shuffle(block)
         result.extend(block)
     return result

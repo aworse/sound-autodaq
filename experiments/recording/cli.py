@@ -5,10 +5,11 @@ Command-line interface: argument parsing and command dispatch (§58-59).
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 from pathlib import Path
 
-from . import hardware, labels as labels_module, metadata, scheduler
+from . import hardware, metadata, progress
 from .config import Config, config_from_dict, load_config
 from .engine import SessionEngine, session_dir_for
 from .errors import RecorderError
@@ -28,41 +29,91 @@ def _config_for_resume(session_dir: Path) -> Config:
     return config_from_dict(resolved)
 
 
+def _next_free_session(config: Config) -> Config:
+    """REQ-48.6: declining to resume starts a new session directory next to
+    the old one (SESSION01 -> SESSION01_2, _3, ...); nothing is overwritten."""
+    k = 2
+    while True:
+        candidate = dataclasses.replace(config, session=dataclasses.replace(config.session, id=f"{config.session.id}_{k}"))
+        if progress.session_dir_state(session_dir_for(candidate)) == "absent":
+            return candidate
+        k += 1
+
+
+def _ask_resume(session_dir: Path) -> str:
+    """REQ-48.1 prompt. Returns 'y', 'n' or 'q'."""
+    prog = progress.read_progress(session_dir / "progress.json")
+    print("Found incomplete session.\n")
+    print(f"Session   : {session_dir}")
+    if prog is not None:
+        print(f"Completed : {prog.completed_trials} / {prog.total_trials}")
+        print(f"Seed      : {prog.random_seed}")
+    print("\nResume?\n  [Y] Resume this session\n  [N] Start a new session\n  [Q] Quit")
+    while True:
+        answer = input("> ").strip().lower()
+        if answer in ("y", "n", "q"):
+            return answer
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     if args.config:
         config = load_config(args.config)
         resume = False
     else:
-        session_dir = Path(args.resume)
-        config = _config_for_resume(session_dir)
+        config = _config_for_resume(Path(args.resume))
         resume = True
+
+    if not resume and not args.dry_run:
+        state = progress.session_dir_state(session_dir_for(config))
+        if state == "complete":
+            print(f"ERROR: {session_dir_for(config)} already holds a complete session. "
+                  "Choose a new session.id in the configuration.", file=sys.stderr)
+            return 1
+        if state == "incomplete":
+            if not sys.stdin.isatty():
+                print(f"ERROR: {session_dir_for(config)} holds an incomplete session. Resume it with "
+                      f"--resume {session_dir_for(config)} or choose a new session.id.", file=sys.stderr)
+                return 1
+            answer = _ask_resume(session_dir_for(config))
+            if answer == "q":
+                return 0
+            if answer == "y":
+                resume = True
+            else:
+                config = _next_free_session(config)
+                print(f"Starting a new session in {session_dir_for(config)}")
 
     engine = SessionEngine(config, backend=SoundDeviceBackend())
 
     if args.dry_run:
         return _dry_run(engine)
 
-    if not resume and engine.session_dir.exists() and (engine.session_dir / "manifest.jsonl").exists():
-        from .progress import is_session_incomplete
-
-        if is_session_incomplete(engine.session_dir):
-            print(f"Found incomplete session in {engine.session_dir}.")
-            print("Re-run with --resume <session_dir> to continue, or choose a new session.id to start fresh.")
-            return 1
-
     control_source = TerminalControlSource()
-    display = Display(enabled=sys.stdout.isatty())
+    display = Display(enabled=True, interactive=sys.stdout.isatty())
     try:
         summary = engine.run(resume=resume, control_source=control_source, display=display)
     except RecorderError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(f"\nERROR: {exc}", file=sys.stderr)
+        if progress.session_dir_state(engine.session_dir) == "incomplete":
+            print(f"Data recorded so far is kept in {engine.session_dir}; after fixing the cause, resume with "
+                  f"--resume {engine.session_dir}", file=sys.stderr)
         return 1
     finally:
         control_source.close()
 
-    print(f"\nSession complete: {summary.valid_trials}/{summary.expected_trials} valid "
-          f"({summary.completion_rate * 100:.2f}%). validation={summary.validation_result}")
-    return 0 if summary.validation_result in ("PASS", None) else 1
+    print(f"\n{summary.valid_trials} valid of {summary.expected_trials} expected "
+          f"({summary.completion_rate * 100:.2f}%), {summary.attempted_trials} trials recorded.")
+    if summary.completed:
+        print("SESSION COMPLETE — validation PASS")
+        return 0
+    if summary.stop_reason:
+        # REQ-29.3: a requested stop exits 0; REQ-46.2: but it is not reported as a complete session.
+        print(f"SESSION INCOMPLETE — stopped: {summary.stop_reason}")
+        print(f"Resume with: python -m experiments.recording --resume {engine.session_dir}")
+        return 0
+    print(f"SESSION INCOMPLETE — validation {summary.validation_result}. Inspect with "
+          f"python -m experiments.recording --validate {engine.session_dir}")
+    return 1
 
 
 def _dry_run(engine: SessionEngine) -> int:
@@ -80,7 +131,8 @@ def _dry_run(engine: SessionEngine) -> int:
     est_bytes = hardware.estimate_bytes(sched.total_trials, stored_ms, cfg.recording.sample_rate, cfg.recording.channels)
 
     print("DRY RUN — no audio device opened, no files written\n")
-    print(f"Config          : valid")
+    print(report.render(), "\n")
+    print("Config          : valid")
     print(f"Class definition: {engine.class_definition_version}")
     print(f"Classes         : {engine.num_classes}")
     print(f"Repetitions     : {cfg.trial.repetitions_per_class}")

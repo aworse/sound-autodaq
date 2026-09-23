@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import dataclasses
 import shutil
-import time
 from pathlib import Path
 
 from . import quality
 from .recorder import AudioBackend, ContinuousRecorder, DeviceInfo
+
+# Any real analog input carries at least a few LSBs of noise; a peak this
+# small means the stream is digital silence.
+NO_SIGNAL_PEAK = 1.0 / quality.PCM16_FULL_SCALE
 
 
 @dataclasses.dataclass
@@ -51,6 +54,11 @@ def run_mic_test(
 
     metrics = quality.measure(segment)
     reasons = []
+    if metrics.peak <= NO_SIGNAL_PEAK:
+        reasons.append(
+            f"no signal: peak {metrics.peak:.6f} is at most one LSB — microphone muted, "
+            "disconnected, or the wrong input device is selected"
+        )
     if overflow:
         reasons.append("audio backend reported overflow during the test")
     if metrics.clipping_ratio > 0:
@@ -76,11 +84,14 @@ def estimate_bytes(total_trials: int, stored_ms: float, sample_rate: int, channe
     return int(raw * safety_factor)
 
 
+def nearest_existing_dir(path) -> Path:
+    path = Path(path).absolute()
+    while not path.exists():
+        path = path.parent
+    return path
+
+
 def free_bytes(path) -> int:
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
-    return shutil.disk_usage(str(path)).free
-
-
-def check_disk_space(output_dir, required_bytes: int) -> bool:
-    return free_bytes(output_dir) >= required_bytes
+    """Free space on the filesystem that will hold `path`, without
+    creating anything (a dry run must not write, REQ-59.1)."""
+    return shutil.disk_usage(str(nearest_existing_dir(path))).free

@@ -7,35 +7,41 @@ Owns: rendering and control input. Never: experimental decisions
 
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
 from typing import Optional
 
-CONTROL_POLICY_TEXT = (
-    "Control policy: this terminal is the sole control surface. Key "
-    "presses here drive [SPACE]/[R]/[S]/[I]/[Q]; the target keystroke "
-    "itself is performed on the physical keyboard under test, which is "
-    "not read by this program in HUMAN mode unless a key-log hook is "
-    "configured (REQ-28.2/28.3)."
-)
-
-_KEYMAP = {
-    " ": "pause",
-    "r": "repeat",
-    "R": "repeat",
-    "s": "skip",
-    "S": "skip",
-    "i": "invalid",
-    "I": "invalid",
-    "q": "quit",
-    "Q": "quit",
+# REQ-28.1 names SPACE/R/S/I/Q, but on a dubeolsik keyboard R, S, I and Q
+# are the keys for ㄱ, ㄴ, ㅑ and ㅂ — target classes. A participant typing
+# ㅂ with the IME in Latin mode would end the session. REQ-28.2 (no
+# collision) wins under the §2.7 priority order, so every control is a
+# digit: digits are not jamo keys and come through unchanged in either IME
+# mode. Letters, jamo and space typed into the terminal are ignored.
+KEYMAP = {
+    "1": "repeat",
+    "2": "skip",
+    "3": "invalid",
+    "4": "pause",
+    "0": "quit",
 }
+
+CONTROL_HELP = "[1] Repeat  [2] Skip  [3] Invalid  [4] Pause/Resume  [0] Quit"
+
+CONTROL_POLICY_TEXT = (
+    "Controls are digit keys typed into this terminal. Jamo/letter keys are "
+    "ignored, so typing the target never triggers a control. A control "
+    "applies to the trial on screen."
+)
 
 
 class ControlSource:
-    """Interface: poll() returns one of 'pause'/'repeat'/'skip'/'invalid'/
-    'quit', or None if nothing is pending. Never blocks."""
+    """poll() returns one of 'repeat'/'skip'/'invalid'/'pause'/'quit', or
+    None if nothing is pending. Never blocks. `interactive` says whether a
+    person is there to answer a prompt (retry/continue/stop)."""
+
+    interactive = False
 
     def poll(self) -> Optional[str]:
         raise NotImplementedError
@@ -45,12 +51,12 @@ class ControlSource:
 
 
 class QueueControlSource(ControlSource):
-    """Programmatic control source for AUTOMATED mode and tests
-    (REQ-24.3): push control names onto `events` and they are delivered
-    on the next poll()."""
+    """Programmatic control source for tests and AUTOMATED mode: controls
+    pushed onto the queue are delivered in order."""
 
-    def __init__(self):
+    def __init__(self, interactive: bool = False):
         self.events: "queue.Queue[str]" = queue.Queue()
+        self.interactive = interactive
 
     def push(self, control: str) -> None:
         self.events.put(control)
@@ -63,36 +69,39 @@ class QueueControlSource(ControlSource):
 
 
 class TerminalControlSource(ControlSource):
-    """Reads single keypresses from stdin in a background thread, without
-    blocking the trial engine. A no-op (always returns None) when stdin
-    is not a TTY, e.g. under CI."""
+    """Reads keypresses from stdin in a background thread without blocking
+    the engine. Inert (always None, not interactive) when stdin is not a
+    TTY, e.g. under CI. close() restores the terminal mode."""
 
     def __init__(self):
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        if sys.stdin.isatty():
+        self._old_attrs = None
+        self._fd = None
+        self.interactive = sys.stdin.isatty()
+        if self.interactive:
+            import termios
+            import tty
+
+            self._fd = sys.stdin.fileno()
+            self._old_attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
 
     def _run(self) -> None:
-        try:
-            import termios
-            import tty
+        import select
 
-            fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
-            try:
-                tty.setcbreak(fd)
-                while not self._stop.is_set():
-                    ch = sys.stdin.read(1)
-                    control = _KEYMAP.get(ch)
-                    if control:
-                        self._queue.put(control)
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        except Exception:
-            return
+        while not self._stop.is_set():
+            ready, _, _ = select.select([self._fd], [], [], 0.1)
+            if not ready:
+                continue
+            chunk = os.read(self._fd, 64).decode("utf-8", errors="ignore")
+            for ch in chunk:
+                control = KEYMAP.get(ch)
+                if control:
+                    self._queue.put(control)
 
     def poll(self) -> Optional[str]:
         try:
@@ -102,12 +111,29 @@ class TerminalControlSource(ControlSource):
 
     def close(self) -> None:
         self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        if self._old_attrs is not None:
+            import termios
+
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
+            self._old_attrs = None
+
+
+def fmt_hms(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "--:--:--"
+    seconds = max(0, int(round(seconds)))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def render_trial_screen(
     participant: str,
     scenario: str,
     session: str,
+    trial_id: int,
     overall_completed: int,
     overall_total: int,
     current_label: str,
@@ -117,60 +143,63 @@ def render_trial_screen(
     status: str,
     elapsed_s: float,
     remaining_s: Optional[float],
+    notice: Optional[str] = None,
 ) -> str:
+    """The trial on screen is always the one being recorded (REQ-27.3):
+    this is rendered before and during a trial, never after it."""
     pct = (100.0 * overall_completed / overall_total) if overall_total else 0.0
-
-    def fmt_hms(seconds: float) -> str:
-        seconds = max(0, int(seconds))
-        h, rem = divmod(seconds, 3600)
-        m, s = divmod(rem, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}"
-
-    remaining_str = f"~{fmt_hms(remaining_s)}  (approx.)" if remaining_s is not None else "unknown"
-
-    return (
-        "====================================\n"
-        " CLASSISM DATA COLLECTION\n"
-        "====================================\n"
-        "\n"
-        f"Participant : {participant}\n"
-        f"Scenario    : {scenario}\n"
-        f"Session     : {session}\n"
-        "\n"
-        "Overall:\n"
-        f"{overall_completed} / {overall_total}    {pct:.1f}%\n"
-        "\n"
-        "Current class:\n"
-        f"{current_label}\n"
-        "\n"
-        "Class:\n"
-        f"{class_completed} / {class_total}\n"
-        "\n"
-        "Next:\n"
-        f"{next_label if next_label else '-'}\n"
-        "\n"
-        "Status:\n"
-        f"{status}\n"
-        "\n"
-        f"Elapsed   : {fmt_hms(elapsed_s)}\n"
-        f"Remaining : {remaining_str}\n"
-        "\n"
-        "[SPACE] Pause  [R] Repeat  [S] Skip\n"
-        "[I] Invalid    [Q] Quit\n"
-        "====================================\n"
-    )
+    remaining = f"~{fmt_hms(remaining_s)}  (approx.)" if remaining_s is not None else "estimating..."
+    lines = [
+        "====================================",
+        " CLASSISM DATA COLLECTION",
+        "====================================",
+        "",
+        f"Participant : {participant}",
+        f"Scenario    : {scenario}",
+        f"Session     : {session}",
+        "",
+        "Overall:",
+        f"{overall_completed} / {overall_total}    {pct:.1f}%",
+        "",
+        f"Trial {trial_id}   target:",
+        "",
+        f"        {current_label}",
+        "",
+        f"Class: {class_completed} / {class_total}      Next: {next_label or '-'}",
+        "",
+        f">>> {status}",
+        "",
+        f"Elapsed   : {fmt_hms(elapsed_s)}",
+        f"Remaining : {remaining}",
+    ]
+    if notice:
+        lines += ["", f"!! {notice}"]
+    lines += [
+        "",
+        CONTROL_HELP,
+        CONTROL_POLICY_TEXT,
+        "====================================",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 class Display:
-    def __init__(self, enabled: bool = True):
+    """`enabled` gates all output; `interactive` gates the clear-screen
+    redraw (a non-TTY gets plain lines instead of escape codes)."""
+
+    def __init__(self, enabled: bool = True, interactive: bool = False):
         self.enabled = enabled
+        self.interactive = interactive
 
     def show(self, text: str) -> None:
-        if self.enabled:
-            sys.stdout.write("\x1b[2J\x1b[H")  # clear screen, home cursor
+        if not self.enabled:
+            return
+        if self.interactive:
+            sys.stdout.write("\x1b[2J\x1b[H")
             sys.stdout.write(text)
             sys.stdout.flush()
 
     def line(self, text: str) -> None:
         if self.enabled:
-            print(text)
+            print(text, flush=True)
