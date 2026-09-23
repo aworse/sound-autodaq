@@ -7,7 +7,6 @@ WAV -> manifest -> validator, with no PortAudio device required.
 import json
 import os
 import signal
-import threading
 
 import numpy as np
 import pytest
@@ -496,12 +495,21 @@ def test_automated_mode_is_refused_rather_than_mislabelled(tmp_path):
 
 
 def test_ctrl_c_is_a_safe_stop(tmp_path):
+    """SIGINT sent while trial 2 is running (from inside the session, so
+    the handler is installed regardless of machine speed)."""
+
+    class CtrlCDuringTrial2(ControlSource):
+        n = 0
+
+        def poll(self):
+            self.n += 1
+            if self.n == 2:
+                os.kill(os.getpid(), signal.SIGINT)
+            return None
+
     engine = _engine(_config(tmp_path))
-    timer = threading.Timer(0.8, lambda: os.kill(os.getpid(), signal.SIGINT))
-    timer.start()
-    try:
-        summary = engine.run(resume=False, control_source=QueueControlSource())
-    finally:
-        timer.cancel()
+    summary = engine.run(resume=False, control_source=CtrlCDuringTrial2())
     assert summary.stop_reason == "operator quit (Ctrl+C)"
+    assert summary.attempted_trials == 2
     assert validate_session(engine.session_dir).count_mismatch is False
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler

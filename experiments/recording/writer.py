@@ -120,6 +120,10 @@ class TrialRecord:
     # "immediate" | "end" | None: where the retry named by superseded_by
     # goes in the queue, so a resumed session re-runs it in the same place.
     requeue: Optional[str] = None
+    # Key detection (input.key_detection = terminal): the raw key behind
+    # observed_label, and how many target keys landed in the recording.
+    observed_key: Optional[str] = None
+    keystrokes: Optional[int] = None
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
