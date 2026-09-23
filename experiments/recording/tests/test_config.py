@@ -61,3 +61,14 @@ def test_wrong_type_rejected():
     d["recording"]["sample_rate"] = "48000"
     with pytest.raises(ConfigError, match="sample_rate"):
         config_from_dict(d)
+
+
+def test_spec_reference_config_with_integer_config_version_is_accepted():
+    from pathlib import Path
+
+    import yaml
+
+    raw = yaml.safe_load((Path(__file__).parents[3] / "configs" / "S01.yaml").read_text(encoding="utf-8"))
+    raw["experiment"]["config_version"] = 1  # exactly as written in spec §52
+    cfg = config_from_dict(raw)
+    assert cfg.experiment.config_version == "1"

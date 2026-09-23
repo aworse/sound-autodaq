@@ -141,3 +141,64 @@ def test_balance_failure_detected(tmp_path):
     (session_dir / "manifest.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     report = validate_session(session_dir)
     assert report.class_balance_warnings
+
+
+def test_csv_jsonl_divergence_detected(tmp_path):
+    session_dir, _ = _build_clean_session(tmp_path)
+    text = (session_dir / "manifest.csv").read_text(encoding="utf-8").splitlines()
+    text[1] = text[1].rsplit(",", 1)[0] + ",skipped"
+    (session_dir / "manifest.csv").write_text("\n".join(text) + "\n", encoding="utf-8")
+    report = validate_session(session_dir)
+    assert not report.passed and report.csv_jsonl_divergence
+
+
+def _write_progress(session_dir, completed):
+    from experiments.recording.progress import Progress, write_progress
+
+    write_progress(session_dir / "progress.json", Progress(
+        session_uid="P01_S01_SESSION01", schedule_file="schedule.json", random_seed=1,
+        total_trials=len(CLASSES) * REPS, completed_trials=completed, last_trial_id=None,
+        next_trial_id=None, updated_utc="",
+    ))
+
+
+def test_count_mismatch_is_progress_vs_manifest(tmp_path):
+    session_dir, sched = _build_clean_session(tmp_path)
+    _write_progress(session_dir, completed=len(sched.trials))
+    assert validate_session(session_dir).passed
+    _write_progress(session_dir, completed=len(sched.trials) + 1)
+    assert validate_session(session_dir).count_mismatch
+
+
+def test_unrecorded_scheduled_trial_fails(tmp_path):
+    session_dir, sched = _build_clean_session(tmp_path)
+    lines = (session_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    (session_dir / "manifest.jsonl").write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    csv_lines = (session_dir / "manifest.csv").read_text(encoding="utf-8").splitlines()
+    (session_dir / "manifest.csv").write_text("\n".join(csv_lines[:-1]) + "\n", encoding="utf-8")
+    report = validate_session(session_dir)
+    assert not report.passed and report.unprocessed_trials == [sched.trials[-1].trial_id]
+
+
+def test_retry_rows_beyond_schedule_are_not_drift(tmp_path):
+    import json
+
+    session_dir, sched = _build_clean_session(tmp_path)
+    first = sched.trials[0]
+    retry_id = len(sched.trials) + 1
+    write_wav_atomic(session_dir / "audio" / trial_filename(retry_id), np.zeros(100, dtype=np.int16), SAMPLE_RATE, CHANNELS)
+    # rewrite: first attempt failed and was retried under retry_id
+    rows = [json.loads(l) for l in (session_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows[0].update(status="audio_overflow", superseded_by=retry_id, requeue="end")
+    (session_dir / "manifest.jsonl").unlink()
+    (session_dir / "manifest.csv").unlink()
+    from experiments.recording.writer import TrialRecord
+
+    mw = ManifestWriter(session_dir)
+    for r in rows:
+        mw.append(TrialRecord(**r))
+    mw.append(_record(retry_id, first.label, first.repetition))
+    mw.close()
+    report = validate_session(session_dir)
+    assert report.passed, report.render()
+    assert not report.class_balance_warnings

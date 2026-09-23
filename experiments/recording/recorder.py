@@ -38,7 +38,15 @@ class DeviceInfo:
 
 class AudioBackend:
     """Interface both the real device backend and the synthetic test
-    backend implement."""
+    backend implement.
+
+    `error` is set (from the audio thread) when the backend reports a
+    condition that makes further capture untrustworthy — input underflow,
+    or the stream ending on its own because the device went away. The
+    engine checks it after every trial and stops the session (REQ-21.4).
+    """
+
+    error: Optional[str] = None
 
     def list_devices(self) -> list:  # list[DeviceInfo]
         raise NotImplementedError
@@ -64,6 +72,8 @@ class AudioBackend:
 class SoundDeviceBackend(AudioBackend):
     def __init__(self):
         self._stream = None
+        self._stopping = False
+        self.error = None
 
     def _sd(self):
         try:
@@ -101,10 +111,6 @@ class SoundDeviceBackend(AudioBackend):
             elif isinstance(device, int):
                 idx = device
             else:
-                idx = sd.query_devices(device, "input")["index"] if hasattr(
-                    sd.query_devices(device, "input"), "get"
-                ) else None
-                # sounddevice returns a dict; resolve index by name lookup.
                 idx = None
                 for d in self.list_devices():
                     if d.name == device:
@@ -143,11 +149,17 @@ class SoundDeviceBackend(AudioBackend):
         def _sd_callback(indata, frames, time_info, status):
             overflow = bool(status.input_overflow) if status else False
             if status and status.input_underflow:
-                # Underflow on input is unusual; surface via overflow path
-                # so the trial is never silently trusted (REQ-21.4).
                 overflow = True
+                if self.error is None:
+                    self.error = "PortAudio reported input underflow"
             callback(indata.copy(), overflow)
 
+        def _on_finished():
+            if not self._stopping and self.error is None:
+                self.error = "audio stream ended unexpectedly (device disconnected?)"
+
+        self._stopping = False
+        self.error = None
         try:
             self._stream = sd.InputStream(
                 device=device_info.index,
@@ -155,12 +167,14 @@ class SoundDeviceBackend(AudioBackend):
                 samplerate=sample_rate,
                 dtype="int16",
                 callback=_sd_callback,
+                finished_callback=_on_finished,
             )
             self._stream.start()
         except Exception as exc:
             raise AudioStreamError(f"failed to open audio input stream: {exc}") from exc
 
     def stop(self) -> None:
+        self._stopping = True
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
@@ -184,7 +198,9 @@ class SyntheticBackend(AudioBackend):
     time.
     """
 
-    def __init__(self, overflow_at_samples: Optional[set] = None):
+    def __init__(self, overflow_at_samples: Optional[set] = None, amplitude: int = 1000):
+        self.error = None
+        self.amplitude = amplitude
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._overflow_at = overflow_at_samples or set()
@@ -211,7 +227,7 @@ class SyntheticBackend(AudioBackend):
 
     def start(self, device_info: DeviceInfo, sample_rate: int, channels: int, callback: AudioCallback) -> None:
         self._stop_event.clear()
-        chunk = max(1, sample_rate // 100)  # ~10ms chunks
+        chunk = max(1, sample_rate // 500)  # ~2 ms chunks: fine-grained like a low-latency device
 
         chunk_period_s = chunk / sample_rate
 
@@ -220,7 +236,7 @@ class SyntheticBackend(AudioBackend):
             next_tick = time.monotonic()
             while not self._stop_event.is_set():
                 sample_indices = np.arange(idx, idx + chunk, dtype=np.int64)
-                values = ((sample_indices % 2000) - 1000).astype(np.int16)
+                values = (((sample_indices % 2000) - 1000) * self.amplitude // 1000).astype(np.int16)
                 block = np.tile(values.reshape(-1, 1), (1, channels))
                 overflow = bool(self._overflow_at & set(sample_indices.tolist()))
                 callback(block, overflow)
