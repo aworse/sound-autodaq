@@ -20,12 +20,12 @@ pynput is imported only when the hook starts: it needs a desktop session
 from __future__ import annotations
 
 import queue
-import time
 from typing import Optional
 
 from .errors import RecorderError
 from .keylog import KEY_FOR_JAMO, SHIFTED_SYMBOLS, KeyEvent
 from .ui import KEYMAP, ControlSource, TerminalControlSource
+from . import clock
 
 _NAMED = {
     "shift": "shift", "shift_l": "shift", "shift_r": "shift",
@@ -63,26 +63,35 @@ def normalize_key(char: Optional[str], name: Optional[str], vk: Optional[int]) -
     return "unknown", False
 
 
+# OS auto-repeat sends a held key again every 30-500 ms (1 s at most
+# before the first repeat). A press of a key that is still down counts as
+# a new keystroke only after a longer gap: some keys (Windows 한/영 and
+# 한자, macOS Caps Lock) never report their release.
+AUTOREPEAT_GAP_NS = 1_200_000_000
+
+
 class HookState:
     """Turns raw press/release callbacks into KeyEvents: tracks Shift and
     drops auto-repeat. Separate from pynput so it can be tested directly."""
 
     def __init__(self, emit):
         self._emit = emit
-        self._down: set = set()
+        self._down: dict = {}  # key -> time of its last press or auto-repeat
 
     def press(self, char, name, vk, t_ns: Optional[int] = None) -> None:
         key, implied_shift = normalize_key(char, name, vk)
+        t = clock.now_ns() if t_ns is None else t_ns
+        last = self._down.get(key)
+        self._down[key] = t
         # Caps Lock is exempt: some systems report its release late or never.
-        if key in self._down and key != "caps_lock":
+        if last is not None and t - last < AUTOREPEAT_GAP_NS and key != "caps_lock":
             return
-        self._down.add(key)
         shift = implied_shift or ("shift" in self._down and key != "shift")
-        self._emit(KeyEvent(key, time.monotonic_ns() if t_ns is None else t_ns, shift))
+        self._emit(KeyEvent(key, t, shift))
 
     def release(self, char, name, vk) -> None:
         key, _ = normalize_key(char, name, vk)
-        self._down.discard(key)
+        self._down.pop(key, None)
 
 
 def _attrs(k):

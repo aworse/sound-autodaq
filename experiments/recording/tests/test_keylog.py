@@ -3,11 +3,12 @@ keyboard-hook and terminal key normalization, then the full engine with
 key events injected the way a participant would type them."""
 
 import json
+import sys
 
 import pytest
 
 from classism.labels import CLASSES, JAMO
-from experiments.recording import keylog
+from experiments.recording import clock, keylog
 from experiments.recording.config import config_from_dict
 from experiments.recording.engine import SessionEngine
 from experiments.recording.errors import PreflightError
@@ -37,9 +38,7 @@ def TYPE_FOR(label, repetition=1):
 def press(source, label, repetition=1, t_ns=None, gap_ns=20 * MS):
     """Type `label` into a QueueControlSource like a hook would report it;
     returns the time of the main (last) key-down."""
-    import time
-
-    t = time.monotonic_ns() if t_ns is None else t_ns
+    t = clock.now_ns() if t_ns is None else t_ns
     seq = TYPE_FOR(label, repetition)
     start = t - gap_ns * (len(seq) - 1)
     for i, (key, shift) in enumerate(seq):
@@ -207,6 +206,19 @@ def test_hook_drops_auto_repeat():
     assert [e.key for e in events] == ["r", "r"]
 
 
+def test_hook_counts_a_key_whose_release_never_comes_again_after_a_pause():
+    """Windows reports no release for 한/영 (VK_HANGUL, 0x15): a second
+    tap seconds later is a new keystroke, not auto-repeat."""
+    state, events = _hook()
+    state.press(None, None, 0x15, t_ns=0)
+    state.press(None, None, 0x15, t_ns=3_000 * MS)
+    state.press("r", None, 114, t_ns=4_000 * MS)
+    for k in range(1, 40):  # held: first repeat after 500 ms, then every 33 ms
+        state.press("r", None, 114, t_ns=4_000 * MS + 500 * MS + k * 33 * MS)
+    assert [(e.key, e.t_ns) for e in events] == [("vk21", 0), ("vk21", 3_000 * MS), ("r", 4_000 * MS)]
+    assert keylog.symbol_of(events[0]) == "<other>"
+
+
 def test_hook_normalizes_names_symbols_and_hangul_layouts():
     assert normalize_key(None, "shift_r", None) == ("shift", False)
     assert normalize_key(None, "caps_lock", None) == ("caps_lock", False)
@@ -347,6 +359,7 @@ def test_resume_refuses_a_key_detection_change(tmp_path):
             resume=True, control_source=QueueControlSource())
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pseudo-terminal")
 def test_terminal_reader_timestamps_and_normalizes_keys(monkeypatch):
     """The real TerminalControlSource, driven through a pseudo-terminal."""
     import os
@@ -362,14 +375,14 @@ def test_terminal_reader_timestamps_and_normalizes_keys(monkeypatch):
     source = TerminalControlSource()
     try:
         assert source.interactive
-        before = time.monotonic_ns()
+        before = clock.now_ns()
         os.write(master, "R".encode())
         time.sleep(0.3)
         os.write(master, "1".encode())
         time.sleep(0.3)
         keys = source.poll_keys()
         assert [(k.key, k.shift) for k in keys] == [("r", True), ("1", False)]
-        assert before <= keys[0].t_ns < keys[1].t_ns <= time.monotonic_ns()
+        assert before <= keys[0].t_ns < keys[1].t_ns <= clock.now_ns()
         assert source.poll() == "repeat" and source.poll() is None
     finally:
         source.close()

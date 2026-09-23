@@ -5,7 +5,6 @@ WAV -> manifest -> validator, with no PortAudio device required.
 """
 
 import json
-import os
 import signal
 
 import numpy as np
@@ -504,7 +503,7 @@ def test_ctrl_c_is_a_safe_stop(tmp_path):
         def poll(self):
             self.n += 1
             if self.n == 2:
-                os.kill(os.getpid(), signal.SIGINT)
+                signal.raise_signal(signal.SIGINT)  # what Ctrl+C delivers, on every OS
             return None
 
     engine = _engine(_config(tmp_path))

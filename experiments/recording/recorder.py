@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from . import clock
 from .errors import AudioDeviceError, AudioStreamError
 
 AudioCallback = Callable[[np.ndarray, bool], None]
@@ -289,7 +290,7 @@ class RingBuffer:
         self._lock = threading.Lock()
         self.total_written = 0
         self._overflow_events: list = []
-        # (time.monotonic_ns() when a block arrived, total samples by then):
+        # (clock.now_ns() when a block arrived, total samples by then):
         # lets a keypress timestamp be turned into a sample index.
         self._anchors: collections.deque = collections.deque(maxlen=4096)
 
@@ -306,7 +307,7 @@ class RingBuffer:
                 self._buf[pos:] = frames[:first]
                 self._buf[: end_pos - self.capacity] = frames[first:]
             self.total_written += n
-            self._anchors.append((time.monotonic_ns(), self.total_written))
+            self._anchors.append((clock.now_ns(), self.total_written))
             if overflow:
                 self._overflow_events.append(OverflowEvent(start, start + n))
 

@@ -7,6 +7,7 @@ import time
 import numpy as np
 import pytest
 
+from experiments.recording import clock
 from experiments.recording.config import config_from_dict
 from experiments.recording.engine import SessionEngine
 from experiments.recording.errors import ConfigError
@@ -48,7 +49,7 @@ class ClickBackend(SyntheticBackend):
 
     def start(self, device_info, sample_rate, channels, callback):
         def with_clicks(block, overflow):
-            now = time.monotonic_ns()
+            now = clock.now_ns()
             with self._lock_clicks:
                 due = [c for c in self.clicks if c <= now]
                 self.clicks = [c for c in self.clicks if c > now]
@@ -74,7 +75,7 @@ class Participant(Display):
     def _press(self, label, rep=1):
         """Type the target (a chord for tense consonants / ㅒㅖ); the click
         goes into the audio at the main key-down."""
-        t = time.monotonic_ns()
+        t = clock.now_ns()
         if self.backend is not None:
             self.backend.click(t)
         self.pressed_at.append(t)
@@ -210,7 +211,7 @@ def test_sample_at_maps_monotonic_time_to_sample_index():
     written = []  # (time just after each block arrived, samples captured by then)
     for _ in range(10):
         buf.write(block, False)
-        written.append((time.monotonic_ns(), buf.total_written))
+        written.append((clock.now_ns(), buf.total_written))
         time.sleep(0.005)
     for t, count in written:
         # at the moment a block has arrived, the index is that block's end

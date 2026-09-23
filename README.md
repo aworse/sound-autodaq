@@ -188,8 +188,20 @@ that changes it is refused.
 hook only sees XWayland windows). macOS: grant the terminal app
 *Input Monitoring* (and *Accessibility*) in System Settings; how macOS
 reports Caps Lock through the hook is not yet verified on hardware, so
-check the `<caps>` trials in the pilot. Windows: no setup. If the hook
-cannot start, the recorder exits with the reason before opening audio.
+check the `<caps>` trials in the pilot. Windows: no setup; run it from
+Windows Terminal or cmd, and the Korean IME may stay in 한글 mode. If the
+hook cannot start, the recorder exits with the reason before opening
+audio.
+
+**Windows specifics.** CI runs the suite on `windows-latest`, including
+the hook fed real `SendInput` key events for all 38 classes. Key and
+audio timestamps use `time.perf_counter_ns` (`experiments/recording/clock.py`):
+before Python 3.13, Windows `time.monotonic` ticks in 15.6 ms steps,
+which would move every cut by up to that much. The 한/영 and 한자 keys
+report no key release on Windows; the hook still counts each tap (as
+`<other>`), because only a press within 1.2 s of the previous one is
+treated as auto-repeat. Opening the dashboard while recording is safe:
+a status-file update that collides with a read is retried.
 
 ## Classes (`classism/labels.py`)
 
@@ -245,13 +257,14 @@ python -m pytest experiments/recording/tests
 xvfb-run -a python -m pytest experiments/recording/tests
 ```
 
-Under Xvfb, `test_keyhook_x11.py` types all 38 classes as real X11 key
-events with xdotool and records a keypress-capture session through the
-real `pynput` hook. Without a display those tests are skipped.
+`test_keyhook_real.py` types all 38 classes as real OS key events
+(xdotool under Xvfb, `SendInput` on Windows) and records a
+keypress-capture session through the real `pynput` hook. Elsewhere those
+tests are skipped.
 
 CI (`.github/workflows/tests.yml`) runs the linter, the full suite and
-a no-write dry run on Python 3.10–3.13 for every pull request and every
-push to `main` (REQ-61.4). A pinned-digest test checks that schedules
+a no-write dry run on Python 3.10–3.13 (Linux) and 3.10/3.13 (Windows)
+for every pull request and every push to `main` (REQ-61.4). A pinned-digest test checks that schedules
 are byte-identical across those versions (REQ-2.4.1).
 
 The full pipeline (scheduler -> continuous audio capture -> segmentation

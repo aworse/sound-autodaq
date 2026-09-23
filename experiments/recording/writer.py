@@ -52,15 +52,23 @@ def write_wav_atomic(path: Path, samples: np.ndarray, sample_rate: int, channels
         wf.setframerate(sample_rate)
         wf.writeframes(np.ascontiguousarray(samples, dtype=np.int16).tobytes())
 
-    fd = os.open(str(tmp_path), os.O_RDONLY)
+    # Windows can only flush a file opened for writing.
+    fd = os.open(str(tmp_path), os.O_RDWR | getattr(os, "O_BINARY", 0))
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
 
     os.replace(str(tmp_path), str(path))
+    fsync_dir(path.parent)
 
-    dir_fd = os.open(str(path.parent), os.O_RDONLY)
+
+def fsync_dir(directory: Path) -> None:
+    """Make a rename durable. POSIX only: Windows cannot open a directory
+    as a file, and NTFS journals the rename itself."""
+    if os.name == "nt":
+        return
+    dir_fd = os.open(str(directory), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
     finally:

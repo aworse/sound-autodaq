@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import hardware, keylog, labels as labels_module, metadata, progress as progress_mod
+from . import clock, hardware, keylog, labels as labels_module, metadata, progress as progress_mod
 from . import quality, scheduler, ui
 from .config import Config
 from .errors import (
@@ -435,7 +435,7 @@ class SessionEngine:
         self._consecutive_failures = 0
         self._notice: Optional[str] = None
         self._sigint = False
-        self._run_start = time.monotonic()
+        self._run_start = clock.now_s()
 
         self._recorder = None
         prev_sigint = None
@@ -508,7 +508,7 @@ class SessionEngine:
             self._handle_orphan_wav(t, manifest)
             return None
 
-        trial_wall_start = time.monotonic()
+        trial_wall_start = clock.now_s()
         offsets: dict = {}
         pre_roll_ns: dict = {}
 
@@ -516,7 +516,7 @@ class SessionEngine:
             if phase in (Phase.PRE_ROLL, Phase.SAVE):
                 offsets[phase] = self._recorder.frames_captured
             if phase == Phase.PRE_ROLL:
-                pre_roll_ns["t"] = time.monotonic_ns()
+                pre_roll_ns["t"] = clock.now_ns()
             text = {
                 Phase.PREPARE: "READY",
                 Phase.PRE_ROLL: "get ready...",
@@ -747,7 +747,7 @@ class SessionEngine:
         self._append(manifest, record)
         log.info("trial complete id=%d status=%s%s", t.trial_id, status.value,
                  f" requeued as {superseded_by} ({requeue})" if superseded_by else "")
-        self._trial_seconds.append(time.monotonic() - trial_wall_start)
+        self._trial_seconds.append(clock.now_s() - trial_wall_start)
 
         if status in SYSTEM_FAILURES:
             self._consecutive_failures += 1
@@ -790,7 +790,7 @@ class SessionEngine:
         limit_ms = self.config.trial.input_window_ms
         deadline = shown_ns + limit_ms * 1_000_000 if limit_ms > 0 else None
         warned = False
-        frames_at_check = {"n": self._recorder.frames_captured, "t": time.monotonic_ns()}
+        frames_at_check = {"n": self._recorder.frames_captured, "t": clock.now_ns()}
         while True:
             for e in self._controls.poll_keys():
                 collected.append(e)
@@ -814,12 +814,12 @@ class SessionEngine:
                 # An open-ended wait must not hide a dead microphone: give up
                 # when the backend reports an error or no audio has arrived
                 # for a whole second; the stall handling then stops safely.
-                if self.backend.error or time.monotonic_ns() - frames_at_check["t"] > 1_000_000_000:
+                if self.backend.error or clock.now_ns() - frames_at_check["t"] > 1_000_000_000:
                     info["reason"] = "stream_error"
                     return None
             else:
-                frames_at_check.update(n=self._recorder.frames_captured, t=time.monotonic_ns())
-            if deadline is not None and time.monotonic_ns() >= deadline:
+                frames_at_check.update(n=self._recorder.frames_captured, t=clock.now_ns())
+            if deadline is not None and clock.now_ns() >= deadline:
                 info["reason"] = "timeout"
                 return None
             time.sleep(0.002)
@@ -990,7 +990,7 @@ class SessionEngine:
             f"Target        : {nxt.label if nxt else '-'}\n\n"
             "[4] resume    [0] quit\n"
         )
-        started = time.monotonic()
+        started = clock.now_s()
         reason = None
         while True:
             c = self._controls.poll()
@@ -1000,7 +1000,7 @@ class SessionEngine:
             if c == "pause":
                 break
             time.sleep(0.05)
-        self._record_break(nxt, time.monotonic() - started, "operator")
+        self._record_break(nxt, clock.now_s() - started, "operator")
         self._controls.poll_keys()  # keys typed while paused belong to no trial
         self._log.info("resume after pause")
         self._save_progress(progress_mod.STATE_RUNNING)
@@ -1011,11 +1011,11 @@ class SessionEngine:
         nxt = self._queue[0]
         self._log.info("break start before trial %d (%.0fs)", nxt.trial_id, cfg.break_.duration_seconds)
         self._save_progress(progress_mod.STATE_BREAK)
-        started = time.monotonic()
+        started = clock.now_s()
         deadline = started + cfg.break_.duration_seconds
         reason = None
         while True:
-            left = deadline - time.monotonic()
+            left = deadline - clock.now_s()
             if left <= 0:
                 break
             self._display.show(f"BREAK\n\nResuming in {int(left) + 1} s\n\nNext target: {nxt.label}\n\n[0] quit\n")
@@ -1024,7 +1024,7 @@ class SessionEngine:
                 reason = "operator quit (during break)"
                 break
             time.sleep(min(0.2, left))
-        self._record_break(nxt, time.monotonic() - started, "automatic")
+        self._record_break(nxt, clock.now_s() - started, "automatic")
         self._controls.poll_keys()
         self._log.info("break end")
         self._save_progress(progress_mod.STATE_RUNNING)
@@ -1075,7 +1075,7 @@ class SessionEngine:
                 class_total=cfg.trial.repetitions_per_class,
                 next_label=self._queue[0].label if self._queue else None,
                 status=status,
-                elapsed_s=time.monotonic() - self._run_start,
+                elapsed_s=clock.now_s() - self._run_start,
                 remaining_s=self._remaining_s(),
                 notice=notice or self._notice,
                 key_detection=cfg.input.key_detection,
@@ -1168,7 +1168,7 @@ class SessionEngine:
             session_uid=cfg.session_uid,
             expected_trials=self._sched.total_trials,
             records=rows,
-            duration_s=time.monotonic() - self._run_start,
+            duration_s=clock.now_s() - self._run_start,
             total_break_s=self._total_break_s,
         )
         summary.stop_reason = stop_reason
