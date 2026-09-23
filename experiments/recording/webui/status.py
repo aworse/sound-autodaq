@@ -16,6 +16,10 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from ..progress import reconstruct_queue
+from ..scheduler import load_schedule
+from ..writer import read_manifest_jsonl
+
 
 def _read_json(path: Path) -> Optional[dict]:
     if not path.exists():
@@ -91,34 +95,40 @@ def read_status(session_dir: Path) -> dict:
     if schedule is None or session_meta is None:
         return {"found": False, "session_dir": str(session_dir)}
 
-    trials_by_id = {t["trial_id"]: t for t in schedule["trials"]}
     total_trials = schedule["total_trials"]
     repetitions_per_class = schedule["repetitions_per_class"]
 
     total_rows, valid_by_label, status_counts, last_row = _count_by(session_dir / "manifest.jsonl")
 
-    next_trial_id = progress["next_trial_id"] if progress else 1
-    next_trial = trials_by_id.get(next_trial_id)
-    current_label = last_row["label"] if last_row else (next_trial["label"] if next_trial else None)
-    current_status = last_row["status"] if last_row else "idle"
+    # The trial being recorded right now is the head of the queue rebuilt
+    # from schedule + manifest (its row is written only when it ends), not
+    # the last row — which is the trial that already finished.
+    pending, _ = reconstruct_queue(
+        load_schedule(session_dir / "schedule.json"), read_manifest_jsonl(session_dir / "manifest.jsonl")
+    )
+    current = pending[0] if pending else None
+    nxt = pending[1] if len(pending) > 1 else None
+    current_label = current.label if current else None
+    pending_pairs = {(t.label, t.repetition) for t in pending}
+    state = (progress or {}).get("state") or ("complete" if summary and summary.get("completed") else "running")
+    current_status = state if current else ("complete" if summary and summary.get("completed") else state)
 
     started = _parse_iso(session_meta.get("started_utc"))
     ended = _parse_iso(session_meta.get("ended_utc")) if session_meta.get("ended_utc") else None
     now = datetime.datetime.now(datetime.timezone.utc)
     elapsed_s = ((ended or now) - started).total_seconds() if started else 0.0
 
-    completed = total_rows if progress is None else progress.get("completed_trials", total_rows)
+    completed = total_trials - len(pending_pairs)
     remaining_s = None
-    if completed > 0 and elapsed_s > 0 and completed < total_trials:
-        avg_per_trial = elapsed_s / completed
-        remaining_s = avg_per_trial * (total_trials - completed)
+    if total_rows > 0 and elapsed_s > 0 and pending:
+        remaining_s = elapsed_s / total_rows * len(pending)
 
     recent = _tail_jsonl(session_dir / "manifest.jsonl", 25)
     recent_overflow = any(r["status"] == "audio_overflow" for r in recent)
     recent_silence = any(r["status"] == "suspicious_silence" for r in recent)
-    recent_clipping = any(r.get("clipping_ratio", 0) > 0 for r in recent)
+    recent_clipping = any((r.get("clipping_ratio") or 0) > 0 for r in recent)
 
-    is_complete = summary is not None or (session_meta.get("ended_utc") is not None)
+    is_complete = bool(summary and summary.get("completed"))
 
     return {
         "found": True,
@@ -134,11 +144,14 @@ def read_status(session_dir: Path) -> dict:
         "overall_completed": completed,
         "overall_total": total_trials,
         "overall_valid": status_counts.get("valid", 0),
+        "current_trial_id": current.trial_id if current else None,
         "current_label": current_label,
         "current_status": current_status,
+        "state": state,
+        "last_trial_status": last_row["status"] if last_row else None,
         "class_completed": valid_by_label.get(current_label, 0) if current_label else 0,
         "class_total": repetitions_per_class,
-        "next_label": next_trial["label"] if next_trial else None,
+        "next_label": nxt.label if nxt else None,
         "elapsed_s": elapsed_s,
         "remaining_s": remaining_s,
         "status_counts": status_counts,
@@ -152,6 +165,7 @@ def read_status(session_dir: Path) -> dict:
         },
         "is_complete": is_complete,
         "validation_result": summary.get("validation_result") if summary else None,
+        "stop_reason": summary.get("stop_reason") if summary else None,
         "completion_rate": summary.get("completion_rate") if summary else (
             (status_counts.get("valid", 0) / total_trials) if total_trials else 0.0
         ),

@@ -51,8 +51,39 @@ def test_t5_repetition_indexing():
 
 
 def test_t6_non_consecutiveness():
-    sched = generate_schedule(CLASSES, REPS, "balanced_random", seed=1, class_definition_version="v1")
-    assert longest_run(sched) <= 2  # sanity bound well below REPS
+    for seed in range(20):
+        sched = generate_schedule(CLASSES, REPS, "balanced_random", seed=seed, class_definition_version="v1")
+        assert longest_run(sched) == 1
+
+
+def test_balanced_random_is_not_round_robin():
+    """A round-robin makes the last class of every n-class window
+    predictable to the participant; a global permutation does not."""
+    classes = tuple(f"K{i:02d}" for i in range(38))
+    sched = generate_schedule(classes, 50, "balanced_random", seed=3, class_definition_version="v1")
+    labels = [t.label for t in sched.trials]
+    full_windows = sum(len(set(labels[i:i + 38])) == 38 for i in range(0, len(labels), 38))
+    assert full_windows <= 1
+
+
+def test_full_scale_schedule_is_balanced_and_repeat_free():
+    classes = tuple(f"K{i:02d}" for i in range(38))
+    sched = generate_schedule(classes, 500, "balanced_random", seed=20260922, class_definition_version="v1")
+    validate_balance(sched, classes, 500)
+    assert longest_run(sched) == 1
+
+
+def test_block_random_does_not_push_classes_to_the_end():
+    """REQ-10.5 with more classes than the block size."""
+    classes = tuple(f"K{i:02d}" for i in range(38))
+    sched = generate_schedule(classes, 20, "block_random", seed=1, class_definition_version="v1", block_size=25)
+    n = len(sched.trials)
+    positions = {}
+    for t in sched.trials:
+        positions.setdefault(t.label, []).append(t.trial_id / n)
+    for label, pos in positions.items():
+        assert 0.4 < sum(pos) / len(pos) < 0.6, label
+        assert min(pos) * n <= 2 * 25, label
 
 
 @pytest.mark.parametrize("strategy,kwargs", [

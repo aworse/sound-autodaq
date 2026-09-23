@@ -326,6 +326,14 @@ def validate_config_dict(raw: dict) -> dict:
     if missing:
         raise ConfigError(f"top level: missing section(s) {sorted(missing)}")
 
+    # The spec's own reference config (§52) writes `config_version: 1`;
+    # accept an integer and store it as the string it identifies.
+    exp = raw.get("experiment")
+    if isinstance(exp, dict):
+        v = exp.get("config_version")
+        if isinstance(v, int) and not isinstance(v, bool):
+            exp["config_version"] = str(v)
+
     for section_name, fields in _SECTION_FIELDS.items():
         _validate_section(section_name, raw[section_name], fields)
 

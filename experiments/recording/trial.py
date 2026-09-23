@@ -127,6 +127,7 @@ class TrialStateMachine:
         input_mode: InputMode,
         on_phase_change=None,
         on_input_window=None,
+        on_countdown=None,
     ) -> TrialResult:
         """Run the full trial timeline.
 
@@ -144,7 +145,13 @@ class TrialStateMachine:
         timing.wall_clock_utc = utc_now_iso()
 
         self._set_phase(Phase.COUNTDOWN, on_phase_change)
-        self.clock.sleep_ms(self.durations.countdown_ms)
+        remaining = self.durations.countdown_ms
+        while remaining > 0:
+            if on_countdown:
+                on_countdown(-(-remaining // 1000))  # whole seconds left, rounded up
+            step = min(1000, remaining)
+            self.clock.sleep_ms(step)
+            remaining -= step
 
         self._set_phase(Phase.PRE_ROLL, on_phase_change)
         self.clock.sleep_ms(self.durations.pre_roll_ms)
@@ -168,7 +175,3 @@ class TrialStateMachine:
             input_mode=input_mode,
             timing=timing,
         )
-
-    def inter_trial_wait(self, on_phase_change=None) -> None:
-        self._set_phase(Phase.INTER_TRIAL, on_phase_change)
-        self.clock.sleep_ms(self.durations.inter_trial_ms)

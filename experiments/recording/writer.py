@@ -80,6 +80,12 @@ def read_wav(path: Path) -> tuple:
     return samples, sample_rate, channels
 
 
+def wav_params(path: Path) -> tuple:
+    """(sample_rate, channels, sample_width_bytes, n_frames) from the header."""
+    with wave.open(str(path), "rb") as wf:
+        return wf.getframerate(), wf.getnchannels(), wf.getsampwidth(), wf.getnframes()
+
+
 @dataclasses.dataclass
 class TrialRecord:
     trial_id: int
@@ -100,17 +106,20 @@ class TrialRecord:
     duration_ms: float
     segment_start_sample: Optional[int]
     segment_end_sample: Optional[int]
-    trial_start_ns: int
-    input_expected_ns: int
+    trial_start_ns: Optional[int]
+    input_expected_ns: Optional[int]
     input_detected_ns: Optional[int]
-    trial_end_ns: int
-    wall_clock_utc: str
-    peak: float
-    rms: float
-    clipping_ratio: float
-    overflow: bool
+    trial_end_ns: Optional[int]
+    wall_clock_utc: Optional[str]
+    peak: Optional[float]
+    rms: Optional[float]
+    clipping_ratio: Optional[float]
+    overflow: Optional[bool]
     notes: Optional[str] = None
     superseded_by: Optional[int] = None
+    # "immediate" | "end" | None: where the retry named by superseded_by
+    # goes in the queue, so a resumed session re-runs it in the same place.
+    requeue: Optional[str] = None
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -128,6 +137,12 @@ class ManifestWriter:
         self.csv_path = self.session_dir / "manifest.csv"
         self.jsonl_path = self.session_dir / "manifest.jsonl"
         self._seen_trial_ids: set = set()
+        self.torn_tails: list = []
+
+        for path in (self.csv_path, self.jsonl_path):
+            torn = _set_aside_torn_tail(path)
+            if torn is not None:
+                self.torn_tails.append(torn)
 
         csv_is_new = not self.csv_path.exists()
         self._csv_file = open(self.csv_path, "a", newline="", encoding="utf-8")
@@ -178,13 +193,40 @@ class ManifestWriter:
         self.close()
 
 
+def _set_aside_torn_tail(path: Path) -> Optional[Path]:
+    """A hard kill mid-append can leave a final line with no newline.
+    Move those bytes to `<name>.torn` (kept for traceability, never
+    deleted) and cut the manifest back to its last complete row, so the
+    next append does not glue a new row onto a fragment."""
+    if not path.exists():
+        return None
+    data = path.read_bytes()
+    if not data or data.endswith(b"\n"):
+        return None
+    cut = data.rfind(b"\n") + 1
+    torn_path = path.with_name(path.name + ".torn")
+    with open(torn_path, "ab") as f:
+        f.write(data[cut:] + b"\n")
+        f.flush()
+        os.fsync(f.fileno())
+    with open(path, "r+b") as f:
+        f.truncate(cut)
+        f.flush()
+        os.fsync(f.fileno())
+    return torn_path
+
+
 def read_manifest_jsonl(path: Path) -> list:
+    """Complete rows only; an unterminated final line is an in-progress or
+    torn append and is not a recorded trial."""
     records = []
     path = Path(path)
     if not path.exists():
         return records
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
+            if not line.endswith("\n"):
+                break
             line = line.strip()
             if line:
                 records.append(json.loads(line))
