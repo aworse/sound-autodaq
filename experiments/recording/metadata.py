@@ -24,8 +24,8 @@ SOURCE_DIR = Path(__file__).resolve().parent
 # Appendix E asks these to be decided and recorded per session.
 IMPLEMENTATION_DECISIONS = {
     "keystroke_detection": (
-        "none (E.1): the input window is purely time-based; input_detected_ns "
-        "and observed_label are always null and status 'mismatch' is never produced"
+        "none (E.1, input.key_detection = none): the input window is purely time-based; "
+        "input_detected_ns and observed_label are always null and status 'mismatch' is never produced"
     ),
     "out_of_window_flagging": "not applicable without a key hook (E.2)",
     "requeue_placement": (
@@ -82,6 +82,46 @@ def get_git_dirty(repo_dir: Optional[Path] = None) -> Optional[bool]:
     return None
 
 
+KEY_DETECTION_DECISIONS = {
+    "keystroke_detection": (
+        "terminal (E.1): every key typed into the recorder terminal is stamped with "
+        "time.monotonic_ns() when read and mapped through the dubeolsik layout; the first target "
+        "key inside the recorded segment gives observed_label and input_detected_ns. IME must be "
+        "in English mode (Hangul composition delays and merges keys) and Caps Lock off"
+    ),
+    "out_of_window_flagging": (
+        "E.2: status 'invalid' (existing value, no schema bump) when the keystroke is outside the "
+        "recorded audio (pre-roll start to post-roll end), when none is detected, when more than one "
+        "key lands in the recording, when the key is not a jamo, when the IME is in Hangul mode, or "
+        "when an operator digit is pressed during the recording; 'mismatch' when the jamo differs "
+        "from the target. Keystrokes in the pre-/post-roll are kept with their timestamp"
+    ),
+}
+
+
+KEYPRESS_CAPTURE_DECISION = (
+    "trial.capture = keypress (deviation from the fixed REQ-22 timeline, for human participants): "
+    "after the countdown the input window stays open until the participant presses a key (at most "
+    "input_window_ms, 0 = no limit). The stored segment runs from pre_roll_ms before to post_roll_ms "
+    "after the keystroke, cut by absolute sample index from the continuous ring buffer (REQ-15.4 "
+    "holds). The keypress time is converted to a sample index through (block-arrival time, samples "
+    "captured) anchors recorded in the audio callback; boundaries are accurate to about one audio "
+    "block (~10 ms on hardware). Stored length is pre_roll_ms + post_roll_ms. input_expected_ns is "
+    "when PRESS appeared; input_detected_ns is the keystroke."
+)
+
+
+def implementation_decisions(key_detection: str, capture: str = "scheduled") -> dict:
+    decisions = dict(IMPLEMENTATION_DECISIONS)
+    if key_detection == "terminal":
+        decisions.update(KEY_DETECTION_DECISIONS)
+    decisions["capture"] = (
+        KEYPRESS_CAPTURE_DECISION if capture == "keypress"
+        else "trial.capture = scheduled: fixed pre-roll / input window / post-roll timeline (REQ-22)"
+    )
+    return decisions
+
+
 def build_session_metadata(
     config,
     class_definition_version: str,
@@ -126,6 +166,7 @@ def build_session_metadata(
         "total_trials": total_trials,
         "randomization_strategy": config.randomization.strategy,
         "random_seed": random_seed,
+        "capture": config.trial.capture,
         "countdown_ms": config.trial.countdown_ms,
         "pre_roll_ms": config.trial.pre_roll_ms,
         "input_window_ms": config.trial.input_window_ms,
@@ -144,7 +185,7 @@ def build_session_metadata(
         "environment": environment_dict,
         "mic_test": mic_test_result,
         "resolved_config": resolved,
-        "implementation_decisions": IMPLEMENTATION_DECISIONS,
+        "implementation_decisions": implementation_decisions(config.input.key_detection, config.trial.capture),
         "breaks": [],
         "resumes": [],
     }

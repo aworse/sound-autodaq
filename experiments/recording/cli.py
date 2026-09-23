@@ -14,6 +14,7 @@ from .config import Config, config_from_dict, load_config
 from .engine import SessionEngine, session_dir_for
 from .errors import RecorderError
 from .recorder import SoundDeviceBackend
+from .trial import ASSUMED_REACTION_MS, estimated_trial_ms, stored_ms
 from .ui import Display, TerminalControlSource
 from .validator import validate_session
 
@@ -26,6 +27,10 @@ def _config_for_resume(session_dir: Path) -> Config:
     resolved = prior.get("resolved_config")
     if not resolved:
         raise RecorderError(f"cannot resume: session.json in {session_dir} has no resolved_config")
+    # Sessions recorded before key detection / keypress capture existed ran
+    # without them; that is a fact about those sessions, not a guessed default.
+    resolved.setdefault("input", {}).setdefault("key_detection", "none")
+    resolved.setdefault("trial", {}).setdefault("capture", "scheduled")
     return config_from_dict(resolved)
 
 
@@ -125,10 +130,10 @@ def _dry_run(engine: SessionEngine) -> int:
         return 1
 
     sched = engine._schedule
-    stored_ms = cfg.trial.pre_roll_ms + cfg.trial.input_window_ms + cfg.trial.post_roll_ms
-    trial_ms = cfg.trial.countdown_ms + cfg.trial.pre_roll_ms + cfg.trial.input_window_ms + cfg.trial.post_roll_ms + cfg.trial.inter_trial_ms
-    est_duration_s = trial_ms / 1000.0 * sched.total_trials
-    est_bytes = hardware.estimate_bytes(sched.total_trials, stored_ms, cfg.recording.sample_rate, cfg.recording.channels)
+    est_duration_s = estimated_trial_ms(cfg.trial) / 1000.0 * sched.total_trials
+    est_bytes = hardware.estimate_bytes(
+        sched.total_trials, stored_ms(cfg.trial), cfg.recording.sample_rate, cfg.recording.channels
+    )
 
     print("DRY RUN — no audio device opened, no files written\n")
     print(report.render(), "\n")
@@ -136,13 +141,15 @@ def _dry_run(engine: SessionEngine) -> int:
     print(f"Class definition: {engine.class_definition_version}")
     print(f"Classes         : {engine.num_classes}")
     print(f"Repetitions     : {cfg.trial.repetitions_per_class}")
-    print(f"Total trials    : {sched.total_trials}\n")
+    print(f"Total trials    : {sched.total_trials}")
+    print(f"Capture         : {cfg.trial.capture}\n")
     print(f"Strategy        : {sched.strategy}")
     print(f"Random seed     : {sched.seed}\n")
     print("Class balance   : ALL PASS")
     print("Schedule        : VALID")
     print("First 10 labels :", " ".join(t.label for t in sched.trials[:10]), "\n")
-    print(f"Estimated duration : ~{est_duration_s / 3600:.1f}h")
+    assumed = f" (assuming a {ASSUMED_REACTION_MS} ms reaction)" if cfg.trial.capture == "keypress" else ""
+    print(f"Estimated duration : ~{est_duration_s / 3600:.1f}h{assumed}")
     print(f"Estimated disk     : {est_bytes / 1e9:.2f} GB\n")
     print("RESULT: PASS")
     return 0

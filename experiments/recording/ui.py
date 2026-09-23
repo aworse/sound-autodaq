@@ -11,14 +11,18 @@ import os
 import queue
 import sys
 import threading
+import time
 from typing import Optional
+
+from .keylog import KeyEvent
 
 # REQ-28.1 names SPACE/R/S/I/Q, but on a dubeolsik keyboard R, S, I and Q
 # are the keys for ㄱ, ㄴ, ㅑ and ㅂ — target classes. A participant typing
 # ㅂ with the IME in Latin mode would end the session. REQ-28.2 (no
 # collision) wins under the §2.7 priority order, so every control is a
 # digit: digits are not jamo keys and come through unchanged in either IME
-# mode. Letters, jamo and space typed into the terminal are ignored.
+# mode. Other keys never act as controls; with input.key_detection =
+# terminal they are timestamped to verify the participant's keystroke.
 KEYMAP = {
     "1": "repeat",
     "2": "skip",
@@ -30,9 +34,12 @@ KEYMAP = {
 CONTROL_HELP = "[1] Repeat  [2] Skip  [3] Invalid  [4] Pause/Resume  [0] Quit"
 
 CONTROL_POLICY_TEXT = (
-    "Controls are digit keys typed into this terminal. Jamo/letter keys are "
-    "ignored, so typing the target never triggers a control. A control "
-    "applies to the trial on screen."
+    "Controls are digit keys typed into this terminal; typing the target never "
+    "triggers a control. A control applies to the trial on screen."
+)
+
+KEY_DETECTION_TEXT = (
+    "Key check ON: type the target in THIS window, input method in English, Caps Lock off."
 )
 
 
@@ -46,6 +53,12 @@ class ControlSource:
     def poll(self) -> Optional[str]:
         raise NotImplementedError
 
+    def poll_keys(self) -> list:
+        """Every key pressed since the last call, as KeyEvent(key, t_ns)
+        stamped with time.monotonic_ns() when read — the clock the trial
+        phases use. Includes control digits."""
+        return []
+
     def close(self) -> None:
         pass
 
@@ -56,10 +69,17 @@ class QueueControlSource(ControlSource):
 
     def __init__(self, interactive: bool = False):
         self.events: "queue.Queue[str]" = queue.Queue()
+        self.keys: "queue.Queue[KeyEvent]" = queue.Queue()
         self.interactive = interactive
 
     def push(self, control: str) -> None:
         self.events.put(control)
+
+    def push_key(self, key: str, t_ns: Optional[int] = None) -> None:
+        self.keys.put(KeyEvent(key, time.monotonic_ns() if t_ns is None else t_ns))
+
+    def poll_keys(self) -> list:
+        return _drain(self.keys)
 
     def poll(self) -> Optional[str]:
         try:
@@ -75,6 +95,7 @@ class TerminalControlSource(ControlSource):
 
     def __init__(self):
         self._queue: "queue.Queue[str]" = queue.Queue()
+        self._keys: "queue.Queue[KeyEvent]" = queue.Queue()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._old_attrs = None
@@ -97,9 +118,14 @@ class TerminalControlSource(ControlSource):
             ready, _, _ = select.select([self._fd], [], [], 0.1)
             if not ready:
                 continue
-            chunk = os.read(self._fd, 64).decode("utf-8", errors="ignore")
-            for ch in chunk:
-                control = KEYMAP.get(ch)
+            data = os.read(self._fd, 64)
+            t_ns = time.monotonic_ns()
+            chunk = data.decode("utf-8", errors="replace")
+            # An escape sequence (arrow keys, F-keys) is one keypress.
+            keys = [chunk] if chunk.startswith("\x1b") else list(chunk)
+            for key in keys:
+                self._keys.put(KeyEvent(key, t_ns))
+                control = KEYMAP.get(key)
                 if control:
                     self._queue.put(control)
 
@@ -108,6 +134,9 @@ class TerminalControlSource(ControlSource):
             return self._queue.get_nowait()
         except queue.Empty:
             return None
+
+    def poll_keys(self) -> list:
+        return _drain(self._keys)
 
     def close(self) -> None:
         self._stop.set()
@@ -118,6 +147,15 @@ class TerminalControlSource(ControlSource):
 
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
             self._old_attrs = None
+
+
+def _drain(q: "queue.Queue") -> list:
+    out = []
+    while True:
+        try:
+            out.append(q.get_nowait())
+        except queue.Empty:
+            return out
 
 
 def fmt_hms(seconds: Optional[float]) -> str:
@@ -144,6 +182,7 @@ def render_trial_screen(
     elapsed_s: float,
     remaining_s: Optional[float],
     notice: Optional[str] = None,
+    key_detection: bool = False,
 ) -> str:
     """The trial on screen is always the one being recorded (REQ-27.3):
     this is rendered before and during a trial, never after it."""
@@ -178,6 +217,7 @@ def render_trial_screen(
         "",
         CONTROL_HELP,
         CONTROL_POLICY_TEXT,
+    ] + ([KEY_DETECTION_TEXT] if key_detection else []) + [
         "====================================",
         "",
     ]

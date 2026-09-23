@@ -17,6 +17,7 @@ def base_config_dict(**overrides) -> dict:
             "allow_resample": False,
         },
         "trial": {
+            "capture": "scheduled",
             "repetitions_per_class": 3,
             "countdown_ms": 0,
             "pre_roll_ms": 10,
@@ -24,7 +25,7 @@ def base_config_dict(**overrides) -> dict:
             "post_roll_ms": 10,
             "inter_trial_ms": 0,
         },
-        "input": {"mode": "human"},
+        "input": {"mode": "human", "key_detection": "none"},
         "randomization": {
             "strategy": "balanced_random",
             "seed": 42,
