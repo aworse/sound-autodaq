@@ -24,8 +24,8 @@ SOURCE_DIR = Path(__file__).resolve().parent
 # Appendix E asks these to be decided and recorded per session.
 IMPLEMENTATION_DECISIONS = {
     "keystroke_detection": (
-        "none (E.1): the input window is purely time-based; input_detected_ns "
-        "and observed_label are always null and status 'mismatch' is never produced"
+        "none (E.1, input.key_detection = none): the input window is purely time-based; "
+        "input_detected_ns and observed_label are always null and status 'mismatch' is never produced"
     ),
     "out_of_window_flagging": "not applicable without a key hook (E.2)",
     "requeue_placement": (
@@ -80,6 +80,30 @@ def get_git_dirty(repo_dir: Optional[Path] = None) -> Optional[bool]:
     except Exception:
         pass
     return None
+
+
+KEY_DETECTION_DECISIONS = {
+    "keystroke_detection": (
+        "terminal (E.1): every key typed into the recorder terminal is stamped with "
+        "time.monotonic_ns() when read and mapped through the dubeolsik layout; the first target "
+        "key inside the recorded segment gives observed_label and input_detected_ns. IME must be "
+        "in English mode (Hangul composition delays and merges keys) and Caps Lock off"
+    ),
+    "out_of_window_flagging": (
+        "E.2: status 'invalid' (existing value, no schema bump) when the keystroke is outside the "
+        "recorded audio (pre-roll start to post-roll end), when none is detected, when more than one "
+        "key lands in the recording, when the key is not a jamo, when the IME is in Hangul mode, or "
+        "when an operator digit is pressed during the recording; 'mismatch' when the jamo differs "
+        "from the target. Keystrokes in the pre-/post-roll are kept with their timestamp"
+    ),
+}
+
+
+def implementation_decisions(key_detection: str) -> dict:
+    decisions = dict(IMPLEMENTATION_DECISIONS)
+    if key_detection == "terminal":
+        decisions.update(KEY_DETECTION_DECISIONS)
+    return decisions
 
 
 def build_session_metadata(
@@ -144,7 +168,7 @@ def build_session_metadata(
         "environment": environment_dict,
         "mic_test": mic_test_result,
         "resolved_config": resolved,
-        "implementation_decisions": IMPLEMENTATION_DECISIONS,
+        "implementation_decisions": implementation_decisions(config.input.key_detection),
         "breaks": [],
         "resumes": [],
     }

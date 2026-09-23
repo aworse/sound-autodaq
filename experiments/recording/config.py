@@ -68,6 +68,7 @@ class TrialSection:
 @dataclasses.dataclass(frozen=True)
 class InputSection:
     mode: str  # human | automated
+    key_detection: str  # terminal | none
 
 
 @dataclasses.dataclass(frozen=True)
@@ -227,7 +228,7 @@ _SECTION_FIELDS = {
         "post_roll_ms": (_INT, False),
         "inter_trial_ms": (_INT, False),
     },
-    "input": {"mode": (_STR, False)},
+    "input": {"mode": (_STR, False), "key_detection": (_STR, False)},
     "randomization": {
         "strategy": (_STR, False),
         "seed": (_INT, True),
@@ -287,6 +288,7 @@ _TOP_LEVEL_SECTIONS = set(_SECTION_FIELDS) | {"hardware"}
 _VALID_FORMATS = {"PCM_16"}
 _VALID_STRATEGIES = {"random", "balanced_random", "block_random", "manual"}
 _VALID_INPUT_MODES = {"human", "automated"}
+_VALID_KEY_DETECTION = {"terminal", "none"}
 _VALID_RESUME_POLICIES = {"discard_current", "continue_current"}
 _VALID_DUPLICATE_POLICIES = {"error", "new_id"}
 
@@ -366,6 +368,12 @@ def validate_config_dict(raw: dict) -> dict:
         raise ConfigError(
             f"input.mode: must be one of {sorted(_VALID_INPUT_MODES)}, "
             f"got {raw['input']['mode']!r}"
+        )
+
+    if raw["input"]["key_detection"] not in _VALID_KEY_DETECTION:
+        raise ConfigError(
+            f"input.key_detection: must be one of {sorted(_VALID_KEY_DETECTION)}, "
+            f"got {raw['input']['key_detection']!r}"
         )
 
     strategy = raw["randomization"]["strategy"]

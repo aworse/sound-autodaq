@@ -24,7 +24,7 @@ def base_config_dict(**overrides) -> dict:
             "post_roll_ms": 10,
             "inter_trial_ms": 0,
         },
-        "input": {"mode": "human"},
+        "input": {"mode": "human", "key_detection": "none"},
         "randomization": {
             "strategy": "balanced_random",
             "seed": 42,

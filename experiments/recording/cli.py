@@ -26,6 +26,9 @@ def _config_for_resume(session_dir: Path) -> Config:
     resolved = prior.get("resolved_config")
     if not resolved:
         raise RecorderError(f"cannot resume: session.json in {session_dir} has no resolved_config")
+    # Sessions recorded before key detection existed ran without it; that
+    # is a fact about those sessions, not a guessed default.
+    resolved.setdefault("input", {}).setdefault("key_detection", "none")
     return config_from_dict(resolved)
 
 

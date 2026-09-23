@@ -88,7 +88,37 @@ SPACE/R/S/I/Q. On a dubeolsik keyboard R, S, I and Q are the keys for ㄱ,
 the IME in Latin mode would end the session. REQ-28.2 (controls must not
 collide with experimental keystrokes) takes precedence under the §2.7
 priority order, so the controls are digits. Letter, jamo and space keys
-typed into the terminal are ignored.
+never act as controls. With key detection on, they are used to verify
+the keystroke (next section).
+
+## Keystroke verification (`input.key_detection`)
+
+With `key_detection: terminal` (the reference config's setting), the
+participant types each target **into the recorder's terminal window**.
+Every key is timestamped on the same monotonic clock as the trial
+phases, then mapped through the dubeolsik layout. That gives each trial
+an independent `observed_label` and `input_detected_ns` (REQ-14.3),
+alongside `observed_key` and `keystrokes`:
+
+| what happened | status |
+| --- | --- |
+| the target jamo, once, inside the recorded audio | `valid` |
+| a different jamo | `mismatch`, then re-recorded |
+| no key / key outside the recorded audio / two keys in one recording / non-jamo key / Hangul IME / operator digit during the recording | `invalid`, then re-recorded |
+
+Requirements: the terminal window must have focus, the **input method
+must be in English mode**, and **Caps Lock must be off**. A Hangul IME
+composes jamo into syllables and delays them, so its characters are
+rejected with a hint to switch. If the setup is wrong, every trial
+fails the check, and the session stops after
+`quality.max_consecutive_failures` trials with the reason on screen
+(for example "no keystroke detected… is its window focused?"). It does
+not loop.
+
+Use `key_detection: none` when the keyboard under test is not connected
+to the recording computer. The input window is then purely time-based
+and `observed_label` stays null. The mode is part of the session: a
+resume that changes it is refused.
 
 ## Class definition: placeholder
 
@@ -106,8 +136,12 @@ class count from `len(CLASSES)`.
 These are also written into every `session.json` under
 `implementation_decisions`:
 
-- **E.1 keystroke detection:** none. The input window is time-based, and
-  `input_detected_ns` / `observed_label` are always null.
+- **E.1 keystroke detection:** chosen per session by
+  `input.key_detection` (see above) and recorded in `session.json`.
+- **E.2 out-of-window keystrokes:** no new status value, so no schema
+  bump. A keystroke outside the recorded audio is `invalid`. One in the
+  pre-roll or post-roll is kept, with its timestamp, for downstream
+  filtering.
 - **E.3 re-queue placement:** repeat and pause-discard re-record
   immediately. Invalid, silent, overflowed and corrupted trials go to the
   end of the session (when `repeat_on_invalid` is true). Skipped trials
@@ -126,6 +160,11 @@ These are also written into every `session.json` under
 ```bash
 python -m pytest experiments/recording/tests
 ```
+
+CI (`.github/workflows/tests.yml`) runs the linter, the full suite and
+a no-write dry run on Python 3.10–3.13 for every pull request and every
+push to `main` (REQ-61.4). A pinned-digest test checks that schedules
+are byte-identical across those versions (REQ-2.4.1).
 
 The full pipeline (scheduler -> continuous audio capture -> segmentation
 -> WAV -> manifest -> validator) is covered without any physical audio

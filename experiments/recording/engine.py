@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import hardware, labels as labels_module, metadata, progress as progress_mod
+from . import hardware, keylog, labels as labels_module, metadata, progress as progress_mod
 from . import quality, scheduler, ui
 from .config import Config
 from .errors import (
@@ -54,9 +54,17 @@ from .writer import (
     write_wav_atomic,
 )
 
-# Failures of the capture itself (not operator decisions); this many in a
-# row triggers a safe stop (REQ-40.4), which also bounds re-queueing.
-SYSTEM_FAILURES = {Status.CORRUPTED, Status.AUDIO_OVERFLOW, Status.SUSPICIOUS_SILENCE}
+# Failed trials that are not operator decisions: capture failures plus
+# keystroke-rule failures. This many in a row triggers a safe stop
+# (REQ-40.4), which also bounds re-queueing — a focus, IME, Caps Lock or
+# microphone problem stops the session with its reason instead of looping.
+SYSTEM_FAILURES = {
+    Status.CORRUPTED,
+    Status.AUDIO_OVERFLOW,
+    Status.SUSPICIOUS_SILENCE,
+    Status.INVALID,
+    Status.MISMATCH,
+}
 
 # A trial that captured less than this fraction of its configured audio
 # means the stream stopped delivering samples (device stall/unplug).
@@ -167,6 +175,11 @@ class SessionEngine:
                 ("channels", prior.get("channels"), cfg.recording.channels),
                 ("sample_format", prior.get("sample_format"), cfg.recording.format),
                 ("input_mode", prior.get("input_mode"), cfg.input.mode),
+                (
+                    "input.key_detection",
+                    ((prior.get("resolved_config") or {}).get("input") or {}).get("key_detection", "none"),
+                    cfg.input.key_detection,
+                ),
                 ("randomization_strategy", prior.get("randomization_strategy"), cfg.randomization.strategy),
                 ("random_seed", prior.get("random_seed"), sched.seed),
                 ("repetitions_per_class", prior.get("repetitions_per_class"), cfg.trial.repetitions_per_class),
@@ -470,10 +483,13 @@ class SessionEngine:
 
         trial_wall_start = time.monotonic()
         offsets: dict = {}
+        pre_roll_ns: dict = {}
 
         def on_phase_change(phase: Phase) -> None:
             if phase in (Phase.PRE_ROLL, Phase.SAVE):
                 offsets[phase] = self._recorder.frames_captured
+            if phase == Phase.PRE_ROLL:
+                pre_roll_ns["t"] = time.monotonic_ns()
             text = {
                 Phase.PREPARE: "READY",
                 Phase.PRE_ROLL: "get ready...",
@@ -504,6 +520,11 @@ class SessionEngine:
         if self._durations.inter_trial_ms > 0:
             time.sleep(self._durations.inter_trial_ms / 1000.0)
         controls = self._drain_controls()
+        key_events = self._controls.poll_keys()
+        stale = [e for e in key_events if e.t_ns < result.timing.trial_start_ns]
+        if stale:
+            self._log.info("discarded %d key(s) pressed before trial %d began", len(stale), t.trial_id)
+        key_events = [e for e in key_events if e.t_ns >= result.timing.trial_start_ns]
 
         start = offsets.get(Phase.PRE_ROLL, self._recorder.frames_captured)
         end = offsets.get(Phase.SAVE, self._recorder.frames_captured)
@@ -549,6 +570,25 @@ class SessionEngine:
             status = Status.SUSPICIOUS_SILENCE
             self._notice = f"trial {t.trial_id} was silent (rms {metrics.rms:.5f}); it will be recorded again"
             log.warning("suspicious silence in trial %d rms=%.6f", t.trial_id, metrics.rms)
+
+        verdict = None
+        if cfg.input.key_detection == "terminal":
+            verdict = keylog.judge(
+                key_events,
+                scheduled_label=t.label,
+                segment_start_ns=pre_roll_ns.get("t", result.timing.input_expected_ns),
+                segment_end_ns=result.timing.trial_end_ns,
+                input_expected_ns=result.timing.input_expected_ns,
+                control_keys=set(ui.KEYMAP),
+            )
+            # Keystroke evidence outranks silence (it says why) but not
+            # capture failures, which make the audio itself untrustworthy.
+            if verdict.status and status in (Status.VALID, Status.SUSPICIOUS_SILENCE):
+                status = verdict.status
+                self._notice = f"trial {t.trial_id}: {verdict.note} — it will be recorded again"
+                log.warning("keystroke check failed for trial %d: %s", t.trial_id, verdict.note)
+            if verdict.note:
+                notes.append(verdict.note)
         if metrics.clipping_ratio > cfg.quality.clipping_threshold:
             self._notice = f"clipping {metrics.clipping_ratio:.4f} on trial {t.trial_id} — check input gain"
             log.warning("clipping ratio %.6f on trial %d", metrics.clipping_ratio, t.trial_id)
@@ -627,7 +667,12 @@ class SessionEngine:
             notes="; ".join(notes) or None,
             superseded_by=superseded_by,
             requeue=requeue,
+            observed_key=verdict.observed_key if verdict else None,
+            keystrokes=verdict.keystrokes if verdict else None,
         )
+        if verdict:
+            record.observed_label = verdict.observed_label
+            record.input_detected_ns = verdict.input_detected_ns
         self._append(manifest, record)
         log.info("trial complete id=%d status=%s%s", t.trial_id, status.value,
                  f" requeued as {superseded_by} ({requeue})" if superseded_by else "")
@@ -645,9 +690,10 @@ class SessionEngine:
         if stop_reason:
             return stop_reason
         if self._consecutive_failures >= cfg.quality.max_consecutive_failures:
+            last = f"{status.value}: {record.notes}" if record.notes else status.value
             reason = (
-                f"{self._consecutive_failures} consecutive quality/integrity failures "
-                f"(last: {status.value}); check the microphone and resume"
+                f"{self._consecutive_failures} consecutive failed trials (last: {last}); "
+                "fix the cause, then resume"
             )
             log.error("safe stop: %s", reason)
             return reason
@@ -918,6 +964,7 @@ class SessionEngine:
                 elapsed_s=time.monotonic() - self._run_start,
                 remaining_s=self._remaining_s(),
                 notice=notice or self._notice,
+                key_detection=cfg.input.key_detection == "terminal",
             )
         )
 

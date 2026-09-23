@@ -108,3 +108,20 @@ def test_schedule_persistence_round_trip(tmp_path):
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["seed"] == 9
     assert raw["strategy"] == "balanced_random"
+
+
+@pytest.mark.parametrize("strategy,kwargs,digest", [
+    ("balanced_random", {}, "d4d7608082e3c719"),
+    ("random", {}, "7a2088e33f01d315"),
+    ("block_random", {"block_size": 25}, "0781e20bd830e422"),
+])
+def test_schedule_is_byte_identical_across_python_versions(strategy, kwargs, digest):
+    """REQ-2.4.1. These digests were produced on Python 3.10-3.13; CI runs
+    this on each version, so a change in the RNG or the strategy code that
+    would silently reorder a resumed session fails here."""
+    import hashlib
+
+    classes = tuple(f"K{i:02d}" for i in range(38))
+    sched = generate_schedule(classes, 50, strategy, seed=20260922, class_definition_version="v", **kwargs)
+    blob = json.dumps(sched.to_dict(), sort_keys=True).encode()
+    assert hashlib.sha256(blob).hexdigest()[:16] == digest
