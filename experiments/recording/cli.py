@@ -223,7 +223,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8_output() -> None:
+    """Labels are Hangul. A Windows console already takes Unicode, but when
+    output is redirected or piped Python falls back to the ANSI code page
+    (cp1252, cp949), which cannot print every jamo: write UTF-8 instead."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv=None) -> int:
+    _utf8_output()
     parser = build_parser()
     args = parser.parse_args(argv)
 

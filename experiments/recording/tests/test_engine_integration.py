@@ -274,6 +274,26 @@ def test_dry_run_writes_nothing(tmp_path):
     assert not (tmp_path / "data").exists()
 
 
+def test_cli_prints_hangul_labels_through_a_legacy_code_page(tmp_path):
+    """Redirected output on Windows falls back to the ANSI code page
+    (cp1252 on the CI runner), which cannot encode jamo."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[3]
+    config = tmp_path / "S01.yaml"
+    config.write_text((repo / "configs" / "S01.yaml").read_text(encoding="utf-8").replace(
+        "root: data", f"root: {(tmp_path / 'data').as_posix()}"), encoding="utf-8")
+    env = dict(os.environ, PYTHONIOENCODING="cp1252", PYTHONPATH=str(repo))
+    out = subprocess.run([sys.executable, "-m", "experiments.recording", "--config", str(config), "--dry-run"],
+                         capture_output=True, env=env, cwd=tmp_path)
+    assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
+    assert "RESULT: PASS" in out.stdout.decode("utf-8")
+    assert not (tmp_path / "data").exists()
+
+
 # -- finding 11: operator controls do what they say -----------------------------
 
 
