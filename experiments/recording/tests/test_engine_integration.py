@@ -240,9 +240,9 @@ def test_null_seed_is_recorded_and_session_resumes(tmp_path):
     config = _config(tmp_path, randomization={"seed": None})
     engine1 = _engine(config)
     engine1.run(resume=False, control_source=_quit_after(3))
-    schedule_seed = json.loads((engine1.session_dir / "schedule.json").read_text())["seed"]
-    session = json.loads((engine1.session_dir / "session.json").read_text())
-    progress = json.loads((engine1.session_dir / "progress.json").read_text())
+    schedule_seed = json.loads((engine1.session_dir / "schedule.json").read_text(encoding="utf-8"))["seed"]
+    session = json.loads((engine1.session_dir / "session.json").read_text(encoding="utf-8"))
+    progress = json.loads((engine1.session_dir / "progress.json").read_text(encoding="utf-8"))
     assert isinstance(schedule_seed, int)
     assert session["random_seed"] == progress["random_seed"] == schedule_seed
     assert session["resolved_config"]["randomization"]["seed"] == schedule_seed
@@ -314,7 +314,7 @@ def test_pause_discard_current_reruns_trial_and_records_break(tmp_path):
     summary = engine.run(resume=False, control_source=ControlsAtTrial({1: ["pause", "pause"]}))
     rows = _rows(engine)
     assert rows[0]["status"] == "interrupted" and rows[1]["trial_id"] == rows[0]["superseded_by"]
-    breaks = json.loads((engine.session_dir / "session.json").read_text())["breaks"]
+    breaks = json.loads((engine.session_dir / "session.json").read_text(encoding="utf-8"))["breaks"]
     assert [b["break_type"] for b in breaks] == ["operator"]
     assert breaks[0]["break_before_trial"] == rows[1]["trial_id"]
     assert summary.completed is True
@@ -340,11 +340,11 @@ def test_automatic_break_is_measured_and_persisted_without_changing_order(tmp_pa
     config = _config(tmp_path, **{"break": {"enabled": True, "every_trials": 10, "duration_seconds": 0.3}})
     engine = _engine(config)
     summary = engine.run(resume=False, control_source=QueueControlSource())
-    breaks = json.loads((engine.session_dir / "session.json").read_text())["breaks"]
+    breaks = json.loads((engine.session_dir / "session.json").read_text(encoding="utf-8"))["breaks"]
     assert [b["break_before_trial"] for b in breaks] == [11, 21, 31]
     assert all(b["break_type"] == "automatic" and b["break_duration_s"] >= 0.3 for b in breaks)
     assert summary.total_break_s >= 0.9
-    schedule = json.loads((engine.session_dir / "schedule.json").read_text())["trials"]
+    schedule = json.loads((engine.session_dir / "schedule.json").read_text(encoding="utf-8"))["trials"]
     assert [r["label"] for r in _rows(engine)] == [t["label"] for t in schedule]
 
 
@@ -377,7 +377,7 @@ def test_stream_stall_stops_safely_and_is_resumable(tmp_path):
     with pytest.raises(AudioStreamError, match="stalled"):
         engine.run(resume=False, control_source=QueueControlSource())
 
-    summary = json.loads((engine.session_dir / "session_summary.json").read_text())
+    summary = json.loads((engine.session_dir / "session_summary.json").read_text(encoding="utf-8"))
     assert summary["completed"] is False and "stalled" in summary["stop_reason"]
     assert _rows(engine)[-1]["status"] == "interrupted"
 
@@ -412,7 +412,7 @@ def _orphan_after_crash(tmp_path, policy):
     config = _config(tmp_path, output={"duplicate_policy": policy})
     engine = _engine(config)
     engine.run(resume=False, control_source=_quit_after(3))
-    schedule = json.loads((engine.session_dir / "schedule.json").read_text())["trials"]
+    schedule = json.loads((engine.session_dir / "schedule.json").read_text(encoding="utf-8"))["trials"]
     from experiments.recording.writer import write_wav_atomic
 
     write_wav_atomic(engine.session_dir / "audio" / trial_filename(4), np.full(1440, 500, np.int16), 48000, 1)

@@ -374,6 +374,15 @@ class SessionEngine:
         control_source: Optional[ui.ControlSource] = None,
         display: Optional[ui.Display] = None,
     ) -> metadata.SessionSummary:
+        with clock.fine_timers():
+            return self._run(resume, control_source, display)
+
+    def _run(
+        self,
+        resume: bool,
+        control_source: Optional[ui.ControlSource],
+        display: Optional[ui.Display],
+    ) -> metadata.SessionSummary:
         cfg = self.config
         self._controls = control_source or ui.QueueControlSource()
         self._display = display or ui.Display(enabled=False)

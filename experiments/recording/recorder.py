@@ -235,7 +235,7 @@ class SyntheticBackend(AudioBackend):
 
         def _run():
             idx = 0
-            next_tick = time.monotonic()
+            next_tick = clock.now_s()
             while not self._stop_event.is_set():
                 sample_indices = np.arange(idx, idx + chunk, dtype=np.int64)
                 values = (((sample_indices % 2000) - 1000) * self.amplitude // 1000).astype(np.int16)
@@ -248,7 +248,7 @@ class SyntheticBackend(AudioBackend):
                 # Pace to real time, like a real device, so trial phase
                 # sleeps and captured sample counts stay consistent.
                 next_tick += chunk_period_s
-                delay = next_tick - time.monotonic()
+                delay = next_tick - clock.now_s()
                 if delay > 0:
                     time.sleep(delay)
 

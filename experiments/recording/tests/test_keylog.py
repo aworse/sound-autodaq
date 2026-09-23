@@ -296,7 +296,7 @@ def test_all_38_classes_are_typed_verified_and_recorded(tmp_path):
         assert r["status"] == "valid", r
         assert r["observed_label"] == r["label"] and r["keystrokes"] == 1
         assert r["trial_start_ns"] <= r["input_detected_ns"] <= r["trial_end_ns"]
-    session = json.loads((engine.session_dir / "session.json").read_text())
+    session = json.loads((engine.session_dir / "session.json").read_text(encoding="utf-8"))
     assert session["implementation_decisions"]["keystroke_detection"].startswith("hook")
     assert "<other>" in session["implementation_decisions"]["other_class"]
     assert validate_session(engine.session_dir).passed
@@ -370,7 +370,7 @@ def test_terminal_reader_timestamps_and_normalizes_keys(monkeypatch):
     from experiments.recording.ui import TerminalControlSource
 
     master, slave = pty.openpty()
-    fake_stdin = os.fdopen(slave, "r")
+    fake_stdin = os.fdopen(slave, "r", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", fake_stdin)
     source = TerminalControlSource()
     try:
