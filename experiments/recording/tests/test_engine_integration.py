@@ -5,7 +5,6 @@ WAV -> manifest -> validator, with no PortAudio device required.
 """
 
 import json
-import os
 import signal
 
 import numpy as np
@@ -241,9 +240,9 @@ def test_null_seed_is_recorded_and_session_resumes(tmp_path):
     config = _config(tmp_path, randomization={"seed": None})
     engine1 = _engine(config)
     engine1.run(resume=False, control_source=_quit_after(3))
-    schedule_seed = json.loads((engine1.session_dir / "schedule.json").read_text())["seed"]
-    session = json.loads((engine1.session_dir / "session.json").read_text())
-    progress = json.loads((engine1.session_dir / "progress.json").read_text())
+    schedule_seed = json.loads((engine1.session_dir / "schedule.json").read_text(encoding="utf-8"))["seed"]
+    session = json.loads((engine1.session_dir / "session.json").read_text(encoding="utf-8"))
+    progress = json.loads((engine1.session_dir / "progress.json").read_text(encoding="utf-8"))
     assert isinstance(schedule_seed, int)
     assert session["random_seed"] == progress["random_seed"] == schedule_seed
     assert session["resolved_config"]["randomization"]["seed"] == schedule_seed
@@ -272,6 +271,26 @@ def test_dry_run_writes_nothing(tmp_path):
     engine = _engine(_config(tmp_path))
     report = engine.preflight(resume=False, dry_run=True)
     assert report.passed
+    assert not (tmp_path / "data").exists()
+
+
+def test_cli_prints_hangul_labels_through_a_legacy_code_page(tmp_path):
+    """Redirected output on Windows falls back to the ANSI code page
+    (cp1252 on the CI runner), which cannot encode jamo."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[3]
+    config = tmp_path / "S01.yaml"
+    config.write_text((repo / "configs" / "S01.yaml").read_text(encoding="utf-8").replace(
+        "root: data", f"root: {(tmp_path / 'data').as_posix()}"), encoding="utf-8")
+    env = dict(os.environ, PYTHONIOENCODING="cp1252", PYTHONPATH=str(repo))
+    out = subprocess.run([sys.executable, "-m", "experiments.recording", "--config", str(config), "--dry-run"],
+                         capture_output=True, env=env, cwd=tmp_path)
+    assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
+    assert "RESULT: PASS" in out.stdout.decode("utf-8")
     assert not (tmp_path / "data").exists()
 
 
@@ -315,7 +334,7 @@ def test_pause_discard_current_reruns_trial_and_records_break(tmp_path):
     summary = engine.run(resume=False, control_source=ControlsAtTrial({1: ["pause", "pause"]}))
     rows = _rows(engine)
     assert rows[0]["status"] == "interrupted" and rows[1]["trial_id"] == rows[0]["superseded_by"]
-    breaks = json.loads((engine.session_dir / "session.json").read_text())["breaks"]
+    breaks = json.loads((engine.session_dir / "session.json").read_text(encoding="utf-8"))["breaks"]
     assert [b["break_type"] for b in breaks] == ["operator"]
     assert breaks[0]["break_before_trial"] == rows[1]["trial_id"]
     assert summary.completed is True
@@ -341,11 +360,11 @@ def test_automatic_break_is_measured_and_persisted_without_changing_order(tmp_pa
     config = _config(tmp_path, **{"break": {"enabled": True, "every_trials": 10, "duration_seconds": 0.3}})
     engine = _engine(config)
     summary = engine.run(resume=False, control_source=QueueControlSource())
-    breaks = json.loads((engine.session_dir / "session.json").read_text())["breaks"]
+    breaks = json.loads((engine.session_dir / "session.json").read_text(encoding="utf-8"))["breaks"]
     assert [b["break_before_trial"] for b in breaks] == [11, 21, 31]
     assert all(b["break_type"] == "automatic" and b["break_duration_s"] >= 0.3 for b in breaks)
     assert summary.total_break_s >= 0.9
-    schedule = json.loads((engine.session_dir / "schedule.json").read_text())["trials"]
+    schedule = json.loads((engine.session_dir / "schedule.json").read_text(encoding="utf-8"))["trials"]
     assert [r["label"] for r in _rows(engine)] == [t["label"] for t in schedule]
 
 
@@ -378,7 +397,7 @@ def test_stream_stall_stops_safely_and_is_resumable(tmp_path):
     with pytest.raises(AudioStreamError, match="stalled"):
         engine.run(resume=False, control_source=QueueControlSource())
 
-    summary = json.loads((engine.session_dir / "session_summary.json").read_text())
+    summary = json.loads((engine.session_dir / "session_summary.json").read_text(encoding="utf-8"))
     assert summary["completed"] is False and "stalled" in summary["stop_reason"]
     assert _rows(engine)[-1]["status"] == "interrupted"
 
@@ -413,7 +432,7 @@ def _orphan_after_crash(tmp_path, policy):
     config = _config(tmp_path, output={"duplicate_policy": policy})
     engine = _engine(config)
     engine.run(resume=False, control_source=_quit_after(3))
-    schedule = json.loads((engine.session_dir / "schedule.json").read_text())["trials"]
+    schedule = json.loads((engine.session_dir / "schedule.json").read_text(encoding="utf-8"))["trials"]
     from experiments.recording.writer import write_wav_atomic
 
     write_wav_atomic(engine.session_dir / "audio" / trial_filename(4), np.full(1440, 500, np.int16), 48000, 1)
@@ -504,7 +523,7 @@ def test_ctrl_c_is_a_safe_stop(tmp_path):
         def poll(self):
             self.n += 1
             if self.n == 2:
-                os.kill(os.getpid(), signal.SIGINT)
+                signal.raise_signal(signal.SIGINT)  # what Ctrl+C delivers, on every OS
             return None
 
     engine = _engine(_config(tmp_path))

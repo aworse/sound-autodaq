@@ -5,31 +5,22 @@ Per CLASSISM-SPEC-REC REQ-2.2.1 / REQ-4.1, no other module may define its
 own class list; everything imports `CLASSES` and `CLASS_DEFINITION_VERSION`
 from here.
 
-PLACEHOLDER: the real classism project's class definition (38 classes per
-the spec) was not available when this repository was created. This file
-lists only the jamo a single dubeolsik keystroke can produce, so every
-trial asks for something physically typeable. Replace this file with the
-project's actual labels.py before collecting training data; the recorder
-derives the class count from len(CLASSES) and needs no other change.
+Mirrors the classifier's label space in aworse/classism (spec.md §4,
+src/labels.py and src/hangul.py at commit c6606a0): 33 base jamo followed
+by 5 special-key tokens, in the same order, so a class index means the
+same thing on both sides.
 """
 
-CLASS_DEFINITION_VERSION = "classism-placeholder-v2"
+CLASS_DEFINITION_VERSION = "classism-afe-38@c6606a0"
 
-# Choseong consonants: 14 base keys plus the 5 tense doubles typed as
-# Shift + base key.
-_CONSONANTS = [
-    "ㄱ", "ㄲ", "ㄴ", "ㄷ", "ㄸ", "ㄹ", "ㅁ", "ㅂ", "ㅃ",
-    "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅉ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ",
-]
+_CONSONANTS = ["ㄱ", "ㄴ", "ㄷ", "ㄹ", "ㅁ", "ㅂ", "ㅅ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ"]  # 14
+_TENSE = ["ㄲ", "ㄸ", "ㅃ", "ㅆ", "ㅉ"]  # 5, typed as Shift + base key
+_VOWELS = ["ㅏ", "ㅐ", "ㅑ", "ㅓ", "ㅔ", "ㅕ", "ㅗ", "ㅛ", "ㅜ", "ㅠ", "ㅡ", "ㅣ"]  # 12
+_SHIFT_VOWELS = ["ㅒ", "ㅖ"]  # 2, typed as Shift + ㅐ / ㅔ
 
-# Vowels with their own key (12) plus the 2 produced by Shift (ㅒ, ㅖ).
-# Compound vowels (ㅘ ㅙ ㅚ ㅝ ㅞ ㅟ ㅢ) need two keystrokes and are
-# therefore not per-keystroke classes.
-_VOWELS = [
-    "ㅏ", "ㅑ", "ㅓ", "ㅕ", "ㅗ", "ㅛ", "ㅜ", "ㅠ", "ㅡ", "ㅣ",
-    "ㅐ", "ㅒ", "ㅔ", "ㅖ",
-]
+JAMO = tuple(_CONSONANTS + _TENSE + _VOWELS + _SHIFT_VOWELS)  # 33
+SPECIAL = ("<sp>", "<bs>", "<shift>", "<caps>", "<other>")  # space, backspace, shift, caps lock, any other key
 
-CLASSES = tuple(_CONSONANTS + _VOWELS)
+CLASSES = JAMO + SPECIAL
 
-assert len(CLASSES) == len(set(CLASSES)), "duplicate class label in labels.py"
+assert len(CLASSES) == 38 and len(set(CLASSES)) == 38, "label space must be 38 unique symbols"

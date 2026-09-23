@@ -17,11 +17,15 @@ from experiments.recording.writer import (
 DUBEOLSIK_SINGLE_KEY = set("ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔㅁㄴㅇㄹㅎㅗㅓㅏㅣㅋㅌㅊㅍㅠㅜㅡㅃㅉㄸㄲㅆㅒㅖ")
 
 
-def test_every_class_is_one_dubeolsik_keystroke():
-    from classism.labels import CLASSES
+def test_classes_match_the_classism_label_space():
+    """Same symbols in the same order as aworse/classism src/labels.py at
+    c6606a0 (33 base jamo from hangul.LABELS, then 5 special tokens), so a
+    class index means the same thing to the recorder and the classifier."""
+    from classism.labels import CLASSES, JAMO, SPECIAL
 
-    assert set(CLASSES) <= DUBEOLSIK_SINGLE_KEY
-    assert len(CLASSES) == len(set(CLASSES))
+    assert CLASSES == tuple("ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ" "ㄲㄸㅃㅆㅉ" "ㅏㅐㅑㅓㅔㅕㅗㅛㅜㅠㅡㅣ" "ㅒㅖ") + (
+        "<sp>", "<bs>", "<shift>", "<caps>", "<other>")
+    assert set(JAMO) == DUBEOLSIK_SINGLE_KEY and len(SPECIAL) == 5
 
 
 def test_mic_test_fails_on_digital_silence():

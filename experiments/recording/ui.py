@@ -14,15 +14,16 @@ import threading
 import time
 from typing import Optional
 
-from .keylog import KeyEvent
+from . import clock
+from .keylog import KeyEvent, normalize_char
 
 # REQ-28.1 names SPACE/R/S/I/Q, but on a dubeolsik keyboard R, S, I and Q
 # are the keys for ㄱ, ㄴ, ㅑ and ㅂ — target classes. A participant typing
 # ㅂ with the IME in Latin mode would end the session. REQ-28.2 (no
 # collision) wins under the §2.7 priority order, so every control is a
-# digit: digits are not jamo keys and come through unchanged in either IME
-# mode. Other keys never act as controls; with input.key_detection =
-# terminal they are timestamped to verify the participant's keystroke.
+# digit: digits are not jamo keys, not class keys, and come through
+# unchanged in either IME mode. Other keys never act as controls; with key
+# detection on they are timestamped to verify the participant's keystroke.
 KEYMAP = {
     "1": "repeat",
     "2": "skip",
@@ -34,13 +35,14 @@ KEYMAP = {
 CONTROL_HELP = "[1] Repeat  [2] Skip  [3] Invalid  [4] Pause/Resume  [0] Quit"
 
 CONTROL_POLICY_TEXT = (
-    "Controls are digit keys typed into this terminal; typing the target never "
-    "triggers a control. A control applies to the trial on screen."
+    "Controls are digit keys; typing the target never triggers a control. "
+    "A control applies to the trial on screen."
 )
 
-KEY_DETECTION_TEXT = (
-    "Key check ON: type the target in THIS window, input method in English, Caps Lock off."
-)
+KEY_DETECTION_TEXT = {
+    "terminal": "Key check ON: type the target in THIS window, input method in English, Caps Lock off.",
+    "hook": "Key check ON (keyboard hook): type on the keyboard, any window, any input method.",
+}
 
 
 class ControlSource:
@@ -55,7 +57,7 @@ class ControlSource:
 
     def poll_keys(self) -> list:
         """Every key pressed since the last call, as KeyEvent(key, t_ns)
-        stamped with time.monotonic_ns() when read — the clock the trial
+        stamped with clock.now_ns() when read — the clock the trial
         phases use. Includes control digits."""
         return []
 
@@ -75,8 +77,9 @@ class QueueControlSource(ControlSource):
     def push(self, control: str) -> None:
         self.events.put(control)
 
-    def push_key(self, key: str, t_ns: Optional[int] = None) -> None:
-        self.keys.put(KeyEvent(key, time.monotonic_ns() if t_ns is None else t_ns))
+    def push_key(self, key: str, t_ns: Optional[int] = None, shift: bool = False) -> None:
+        """Deliver a normalized key-down (see keylog), like a hook would."""
+        self.keys.put(KeyEvent(key, clock.now_ns() if t_ns is None else t_ns, shift))
 
     def poll_keys(self) -> list:
         return _drain(self.keys)
@@ -91,9 +94,13 @@ class QueueControlSource(ControlSource):
 class TerminalControlSource(ControlSource):
     """Reads keypresses from stdin in a background thread without blocking
     the engine. Inert (always None, not interactive) when stdin is not a
-    TTY, e.g. under CI. close() restores the terminal mode."""
+    TTY, e.g. under CI. close() restores the terminal mode.
 
-    def __init__(self):
+    With swallow=True it only keeps the terminal quiet (no echo) and
+    discards what is typed; the keyboard hook is then the input source."""
+
+    def __init__(self, swallow: bool = False):
+        self._swallow = swallow
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._keys: "queue.Queue[KeyEvent]" = queue.Queue()
         self._stop = threading.Event()
@@ -102,16 +109,30 @@ class TerminalControlSource(ControlSource):
         self._fd = None
         self.interactive = sys.stdin.isatty()
         if self.interactive:
-            import termios
-            import tty
+            if os.name == "nt":
+                target = self._run_windows
+            else:
+                import termios
+                import tty
 
-            self._fd = sys.stdin.fileno()
-            self._old_attrs = termios.tcgetattr(self._fd)
-            tty.setcbreak(self._fd)
-            self._thread = threading.Thread(target=self._run, daemon=True)
+                self._fd = sys.stdin.fileno()
+                self._old_attrs = termios.tcgetattr(self._fd)
+                tty.setcbreak(self._fd)
+                target = self._run_posix
+            self._thread = threading.Thread(target=target, daemon=True)
             self._thread.start()
 
-    def _run(self) -> None:
+    def _handle(self, chars: list, t_ns: int) -> None:
+        if self._swallow:
+            return
+        for ch in chars:
+            key, shift = normalize_char(ch)
+            self._keys.put(KeyEvent(key, t_ns, shift))
+            control = KEYMAP.get(key)
+            if control:
+                self._queue.put(control)
+
+    def _run_posix(self) -> None:
         import select
 
         while not self._stop.is_set():
@@ -119,15 +140,27 @@ class TerminalControlSource(ControlSource):
             if not ready:
                 continue
             data = os.read(self._fd, 64)
-            t_ns = time.monotonic_ns()
+            t_ns = clock.now_ns()
             chunk = data.decode("utf-8", errors="replace")
             # An escape sequence (arrow keys, F-keys) is one keypress.
-            keys = [chunk] if chunk.startswith("\x1b") else list(chunk)
-            for key in keys:
-                self._keys.put(KeyEvent(key, t_ns))
-                control = KEYMAP.get(key)
-                if control:
-                    self._queue.put(control)
+            self._handle([chunk] if chunk.startswith("\x1b") else list(chunk), t_ns)
+
+    def _run_windows(self) -> None:
+        # The Windows console has no cbreak mode or select() on stdin:
+        # msvcrt reads one key at a time without echo. Polled every 2 ms,
+        # which bounds the timestamp delay of terminal key detection.
+        import msvcrt
+
+        while not self._stop.is_set():
+            if not msvcrt.kbhit():
+                time.sleep(0.002)
+                continue
+            t_ns = clock.now_ns()
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):  # arrow / function key: a second code follows
+                msvcrt.getwch()
+                ch = "\x1b["  # one "special" key, like a POSIX escape sequence
+            self._handle([ch], t_ns)
 
     def poll(self) -> Optional[str]:
         try:
@@ -182,7 +215,8 @@ def render_trial_screen(
     elapsed_s: float,
     remaining_s: Optional[float],
     notice: Optional[str] = None,
-    key_detection: bool = False,
+    key_detection: str = "none",
+    hint: str = "",
 ) -> str:
     """The trial on screen is always the one being recorded (REQ-27.3):
     this is rendered before and during a trial, never after it."""
@@ -202,7 +236,7 @@ def render_trial_screen(
         "",
         f"Trial {trial_id}   target:",
         "",
-        f"        {current_label}",
+        f"        {current_label}   {hint}".rstrip(),
         "",
         f"Class: {class_completed} / {class_total}      Next: {next_label or '-'}",
         "",
@@ -217,11 +251,26 @@ def render_trial_screen(
         "",
         CONTROL_HELP,
         CONTROL_POLICY_TEXT,
-    ] + ([KEY_DETECTION_TEXT] if key_detection else []) + [
+    ] + ([KEY_DETECTION_TEXT[key_detection]] if key_detection in KEY_DETECTION_TEXT else []) + [
         "====================================",
         "",
     ]
     return "\n".join(lines)
+
+
+def _enable_windows_ansi() -> None:
+    """Let the classic Windows console (conhost) interpret the escape codes
+    used for the clear-screen redraw; Windows Terminal already does."""
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
 
 
 class Display:
@@ -231,6 +280,8 @@ class Display:
     def __init__(self, enabled: bool = True, interactive: bool = False):
         self.enabled = enabled
         self.interactive = interactive
+        if interactive and os.name == "nt":
+            _enable_windows_ansi()
 
     def show(self, text: str) -> None:
         if not self.enabled:

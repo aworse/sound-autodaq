@@ -93,7 +93,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.dry_run:
         return _dry_run(engine)
 
-    control_source = TerminalControlSource()
+    if config.input.key_detection == "hook":
+        from .keyhook import HookControlSource
+
+        try:
+            control_source = HookControlSource()
+        except RecorderError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+    else:
+        control_source = TerminalControlSource()
     display = Display(enabled=True, interactive=sys.stdout.isatty())
     try:
         summary = engine.run(resume=resume, control_source=control_source, display=display)
@@ -214,7 +223,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8_output() -> None:
+    """Labels are Hangul. A Windows console already takes Unicode, but when
+    output is redirected or piped Python falls back to the ANSI code page
+    (cp1252, cp949), which cannot print every jamo: write UTF-8 instead."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv=None) -> int:
+    _utf8_output()
     parser = build_parser()
     args = parser.parse_args(argv)
 

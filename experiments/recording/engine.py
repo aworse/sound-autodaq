@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import hardware, keylog, labels as labels_module, metadata, progress as progress_mod
+from . import clock, hardware, keylog, labels as labels_module, metadata, progress as progress_mod
 from . import quality, scheduler, ui
 from .config import Config
 from .errors import (
@@ -67,6 +67,10 @@ SYSTEM_FAILURES = {
     Status.INVALID,
     Status.MISMATCH,
 }
+
+# A terminal receives characters, not key presses: Shift or Caps Lock on
+# their own produce nothing it can read.
+TERMINAL_BLIND_CLASSES = {"<shift>", "<caps>"}
 
 # A trial that captured less than this fraction of its configured audio
 # means the stream stopped delivering samples (device stall/unplug).
@@ -241,6 +245,16 @@ class SessionEngine:
             f"{len(self.classes)} classes x {cfg.trial.repetitions_per_class} reps = {expected_total}",
         )
 
+        unseen = [c for c in self.classes if c in TERMINAL_BLIND_CLASSES]
+        if cfg.input.key_detection == "terminal" and unseen:
+            report.add(
+                "key detection can see every class",
+                False,
+                f"a terminal never receives a bare {' / '.join(unseen)} press, so those trials could never be "
+                "verified; use input.key_detection: hook",
+            )
+            return report
+
         state = progress_mod.session_dir_state(self.session_dir)
         if resume:
             ok = state == "incomplete"
@@ -360,6 +374,15 @@ class SessionEngine:
         control_source: Optional[ui.ControlSource] = None,
         display: Optional[ui.Display] = None,
     ) -> metadata.SessionSummary:
+        with clock.fine_timers():
+            return self._run(resume, control_source, display)
+
+    def _run(
+        self,
+        resume: bool,
+        control_source: Optional[ui.ControlSource],
+        display: Optional[ui.Display],
+    ) -> metadata.SessionSummary:
         cfg = self.config
         self._controls = control_source or ui.QueueControlSource()
         self._display = display or ui.Display(enabled=False)
@@ -421,7 +444,7 @@ class SessionEngine:
         self._consecutive_failures = 0
         self._notice: Optional[str] = None
         self._sigint = False
-        self._run_start = time.monotonic()
+        self._run_start = clock.now_s()
 
         self._recorder = None
         prev_sigint = None
@@ -494,7 +517,7 @@ class SessionEngine:
             self._handle_orphan_wav(t, manifest)
             return None
 
-        trial_wall_start = time.monotonic()
+        trial_wall_start = clock.now_s()
         offsets: dict = {}
         pre_roll_ns: dict = {}
 
@@ -502,11 +525,11 @@ class SessionEngine:
             if phase in (Phase.PRE_ROLL, Phase.SAVE):
                 offsets[phase] = self._recorder.frames_captured
             if phase == Phase.PRE_ROLL:
-                pre_roll_ns["t"] = time.monotonic_ns()
+                pre_roll_ns["t"] = clock.now_ns()
             text = {
                 Phase.PREPARE: "READY",
                 Phase.PRE_ROLL: "get ready...",
-                Phase.INPUT_WINDOW: f"PRESS   {t.label}   NOW",
+                Phase.INPUT_WINDOW: f"PRESS   {t.label}   {keylog.prompt_hint(t.label, t.repetition)} NOW",
                 Phase.POST_ROLL: "recording... hold still",
                 Phase.SAVE: "saved",
             }.get(phase)
@@ -522,7 +545,7 @@ class SessionEngine:
 
         def on_phase_change_capture(phase: Phase) -> None:
             if keypress and phase == Phase.INPUT_WINDOW:
-                self._render(t, f"PRESS   {t.label}   (take your time)")
+                self._render(t, self._press_text(t))
             else:
                 on_phase_change(phase)
 
@@ -622,7 +645,7 @@ class SessionEngine:
             log.warning("suspicious silence in trial %d rms=%.6f", t.trial_id, metrics.rms)
 
         verdict = None
-        if cfg.input.key_detection == "terminal" and not no_key_by_control:
+        if cfg.input.key_detection in ("hook", "terminal") and not no_key_by_control:
             verdict = keylog.judge(
                 key_events,
                 scheduled_label=t.label,
@@ -630,6 +653,7 @@ class SessionEngine:
                 segment_end_ns=result.timing.trial_end_ns,
                 input_expected_ns=result.timing.input_expected_ns,
                 control_keys=set(ui.KEYMAP),
+                prompted=keylog.prompted_key(t.label, t.repetition),
             )
             # Keystroke evidence outranks silence (it says why) but not
             # capture failures, which make the audio itself untrustworthy.
@@ -732,7 +756,7 @@ class SessionEngine:
         self._append(manifest, record)
         log.info("trial complete id=%d status=%s%s", t.trial_id, status.value,
                  f" requeued as {superseded_by} ({requeue})" if superseded_by else "")
-        self._trial_seconds.append(time.monotonic() - trial_wall_start)
+        self._trial_seconds.append(clock.now_s() - trial_wall_start)
 
         if status in SYSTEM_FAILURES:
             self._consecutive_failures += 1
@@ -775,16 +799,18 @@ class SessionEngine:
         limit_ms = self.config.trial.input_window_ms
         deadline = shown_ns + limit_ms * 1_000_000 if limit_ms > 0 else None
         warned = False
-        frames_at_check = {"n": self._recorder.frames_captured, "t": time.monotonic_ns()}
+        frames_at_check = {"n": self._recorder.frames_captured, "t": clock.now_ns()}
         while True:
             for e in self._controls.poll_keys():
                 collected.append(e)
                 if e.key in ui.KEYMAP:
                     info["reason"] = "control"
                     return None
+                if not keylog.is_trigger(e, t.label, ui.KEYMAP):
+                    continue  # a chord's Shift: kept for the check, never the trigger
                 if e.t_ns < shown_ns:
                     if not warned:
-                        self._render(t, f"PRESS   {t.label}   (take your time)",
+                        self._render(t, self._press_text(t),
                                      notice="too early — wait until PRESS appears, then press")
                         warned = True
                     continue
@@ -797,12 +823,12 @@ class SessionEngine:
                 # An open-ended wait must not hide a dead microphone: give up
                 # when the backend reports an error or no audio has arrived
                 # for a whole second; the stall handling then stops safely.
-                if self.backend.error or time.monotonic_ns() - frames_at_check["t"] > 1_000_000_000:
+                if self.backend.error or clock.now_ns() - frames_at_check["t"] > 1_000_000_000:
                     info["reason"] = "stream_error"
                     return None
             else:
-                frames_at_check.update(n=self._recorder.frames_captured, t=time.monotonic_ns())
-            if deadline is not None and time.monotonic_ns() >= deadline:
+                frames_at_check.update(n=self._recorder.frames_captured, t=clock.now_ns())
+            if deadline is not None and clock.now_ns() >= deadline:
                 info["reason"] = "timeout"
                 return None
             time.sleep(0.002)
@@ -973,7 +999,7 @@ class SessionEngine:
             f"Target        : {nxt.label if nxt else '-'}\n\n"
             "[4] resume    [0] quit\n"
         )
-        started = time.monotonic()
+        started = clock.now_s()
         reason = None
         while True:
             c = self._controls.poll()
@@ -983,7 +1009,7 @@ class SessionEngine:
             if c == "pause":
                 break
             time.sleep(0.05)
-        self._record_break(nxt, time.monotonic() - started, "operator")
+        self._record_break(nxt, clock.now_s() - started, "operator")
         self._controls.poll_keys()  # keys typed while paused belong to no trial
         self._log.info("resume after pause")
         self._save_progress(progress_mod.STATE_RUNNING)
@@ -994,11 +1020,11 @@ class SessionEngine:
         nxt = self._queue[0]
         self._log.info("break start before trial %d (%.0fs)", nxt.trial_id, cfg.break_.duration_seconds)
         self._save_progress(progress_mod.STATE_BREAK)
-        started = time.monotonic()
+        started = clock.now_s()
         deadline = started + cfg.break_.duration_seconds
         reason = None
         while True:
-            left = deadline - time.monotonic()
+            left = deadline - clock.now_s()
             if left <= 0:
                 break
             self._display.show(f"BREAK\n\nResuming in {int(left) + 1} s\n\nNext target: {nxt.label}\n\n[0] quit\n")
@@ -1007,7 +1033,7 @@ class SessionEngine:
                 reason = "operator quit (during break)"
                 break
             time.sleep(min(0.2, left))
-        self._record_break(nxt, time.monotonic() - started, "automatic")
+        self._record_break(nxt, clock.now_s() - started, "automatic")
         self._controls.poll_keys()
         self._log.info("break end")
         self._save_progress(progress_mod.STATE_RUNNING)
@@ -1058,12 +1084,18 @@ class SessionEngine:
                 class_total=cfg.trial.repetitions_per_class,
                 next_label=self._queue[0].label if self._queue else None,
                 status=status,
-                elapsed_s=time.monotonic() - self._run_start,
+                elapsed_s=clock.now_s() - self._run_start,
                 remaining_s=self._remaining_s(),
                 notice=notice or self._notice,
-                key_detection=cfg.input.key_detection == "terminal",
+                key_detection=cfg.input.key_detection,
+                hint=keylog.prompt_hint(t.label, t.repetition),
             )
         )
+
+    @staticmethod
+    def _press_text(t: ScheduledTrial) -> str:
+        hint = keylog.prompt_hint(t.label, t.repetition)
+        return f"PRESS   {t.label}   {hint} (take your time)".replace("  (", " (")
 
     # -- files --------------------------------------------------------------
 
@@ -1145,7 +1177,7 @@ class SessionEngine:
             session_uid=cfg.session_uid,
             expected_trials=self._sched.total_trials,
             records=rows,
-            duration_s=time.monotonic() - self._run_start,
+            duration_s=clock.now_s() - self._run_start,
             total_break_s=self._total_break_s,
         )
         summary.stop_reason = stop_reason

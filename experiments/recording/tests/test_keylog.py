@@ -1,14 +1,18 @@
-"""Keystroke verification (Appendix E.1/E.2): pure judging rules, then the
-full engine with key events injected when the participant is told to press."""
+"""Keystroke verification (Appendix E.1/E.2): the judging rules, the
+keyboard-hook and terminal key normalization, then the full engine with
+key events injected the way a participant would type them."""
 
 import json
+import sys
 
 import pytest
 
-from experiments.recording import keylog
+from classism.labels import CLASSES, JAMO
+from experiments.recording import clock, keylog
 from experiments.recording.config import config_from_dict
 from experiments.recording.engine import SessionEngine
 from experiments.recording.errors import PreflightError
+from experiments.recording.keyhook import HookState, normalize_key
 from experiments.recording.keylog import KeyEvent, judge
 from experiments.recording.recorder import SyntheticBackend
 from experiments.recording.tests.helpers import base_config_dict
@@ -20,34 +24,117 @@ from experiments.recording.writer import read_manifest_jsonl
 MS = 1_000_000
 # segment: pre-roll 0..100 ms, input window 100..200 ms, post-roll 200..300 ms
 SEG = dict(segment_start_ns=0, segment_end_ns=300 * MS, input_expected_ns=100 * MS, control_keys=set(KEYMAP))
-KEY_FOR = {jamo: key for key, jamo in {**keylog._DUBEOLSIK, **keylog._DUBEOLSIK_SHIFT}.items()}
 
 
-def test_dubeolsik_mapping_including_shift():
-    assert keylog.key_to_jamo("r") == "ㄱ"
-    assert keylog.key_to_jamo("R") == "ㄲ"
-    assert keylog.key_to_jamo("O") == "ㅒ"
-    assert keylog.key_to_jamo("K") == "ㅏ"  # Shift does not change ㅏ
-    assert keylog.key_to_jamo(" ") is None
-    from classism.labels import CLASSES
+def TYPE_FOR(label, repetition=1):
+    """The key-downs a person makes for a target: [(key, shift), ...].
+    A tense consonant or ㅒ/ㅖ is a chord: Shift down, then the letter."""
+    if label in keylog.KEY_FOR_JAMO:
+        key, shift = keylog.KEY_FOR_JAMO[label]
+        return [("shift", False), (key, True)] if shift else [(key, False)]
+    return [(keylog.prompted_key(label, repetition), False)]
 
-    assert set(CLASSES) <= set(KEY_FOR), "every class must be typeable"
+
+def press(source, label, repetition=1, t_ns=None, gap_ns=20 * MS):
+    """Type `label` into a QueueControlSource like a hook would report it;
+    returns the time of the main (last) key-down."""
+    t = clock.now_ns() if t_ns is None else t_ns
+    seq = TYPE_FOR(label, repetition)
+    start = t - gap_ns * (len(seq) - 1)
+    for i, (key, shift) in enumerate(seq):
+        source.push_key(key, start + i * gap_ns, shift=shift)
+    return t
+
+
+def ev(seq, t0=150 * MS, gap=20 * MS):
+    return [KeyEvent(k, t0 + i * gap, s) for i, (k, s) in enumerate(seq)]
+
+
+# -- mapping ------------------------------------------------------------------
+
+
+def test_every_class_can_be_typed_and_maps_back_to_itself():
+    for label in CLASSES:
+        seq = TYPE_FOR(label)
+        main = KeyEvent(seq[-1][0], 0, seq[-1][1])
+        assert keylog.symbol_of(main, KEYMAP) == label, label
+
+
+def test_shift_comes_from_the_shift_key_not_from_letter_case():
+    assert keylog.symbol_of(KeyEvent("r", 0, shift=True)) == "ㄲ"
+    assert keylog.symbol_of(KeyEvent("r", 0, shift=False)) == "ㄱ"
+    assert keylog.symbol_of(KeyEvent("k", 0, shift=True)) == "ㅏ"  # Shift does not change ㅏ
+    assert keylog.symbol_of(KeyEvent("enter", 0)) == "<other>"
+    assert keylog.symbol_of(KeyEvent("1", 0), KEYMAP) is None  # operator digit
+
+
+def test_other_prompts_cycle_through_non_class_keys():
+    keys = [keylog.prompted_key("<other>", rep) for rep in range(1, len(keylog.OTHER_KEYS) + 2)]
+    assert keys[: len(keylog.OTHER_KEYS)] == list(keylog.OTHER_KEYS) and keys[-1] == keys[0]
+    for key in keylog.OTHER_KEYS:
+        assert keylog.symbol_of(KeyEvent(key, 0), KEYMAP) == "<other>"
+    assert keylog.prompt_hint("<other>", 1) == "(press Enter)"
+    assert keylog.prompt_hint("ㄲ", 1) == "(Shift + ㄱ)"
+
+
+def test_terminal_characters_normalize_to_key_names():
+    assert keylog.normalize_char("R") == ("r", True)
+    assert keylog.normalize_char(" ") == ("space", False)
+    assert keylog.normalize_char("\x7f") == ("backspace", False)
+    assert keylog.normalize_char("!") == ("1", True)
+    assert keylog.normalize_char("ㄱ") == ("ㄱ", False)
+
+
+# -- judging ------------------------------------------------------------------
 
 
 def test_correct_key_in_window_has_no_objection():
-    v = judge([KeyEvent("r", 150 * MS)], "ㄱ", **SEG)
+    v = judge(ev([("r", False)]), "ㄱ", **SEG)
     assert v.status is None
     assert (v.observed_label, v.observed_key, v.input_detected_ns, v.keystrokes) == ("ㄱ", "r", 150 * MS, 1)
 
 
+def test_tense_consonant_chord_is_one_keystroke():
+    v = judge(ev([("shift", False), ("r", True)]), "ㄲ", **SEG)
+    assert v.status is None and v.observed_label == "ㄲ" and v.keystrokes == 1
+    assert v.input_detected_ns == 170 * MS  # the R, not the Shift
+
+
+def test_tense_target_without_shift_is_mismatch_with_hint():
+    v = judge(ev([("r", False)]), "ㄲ", **SEG)
+    assert v.status == Status.MISMATCH and "hold Shift" in v.note
+
+
+def test_plain_target_typed_with_shift_is_an_extra_keystroke():
+    v = judge(ev([("shift", False), ("k", True)]), "ㅏ", **SEG)
+    assert v.status == Status.INVALID and v.keystrokes == 2
+
+
+def test_plain_consonant_typed_with_shift_is_mismatch():
+    v = judge(ev([("shift", False), ("r", True)]), "ㄱ", **SEG)
+    assert v.status == Status.MISMATCH and "without Shift" in v.note
+
+
+@pytest.mark.parametrize("label,key", [("<sp>", "space"), ("<bs>", "backspace"), ("<caps>", "caps_lock"),
+                                       ("<shift>", "shift")])
+def test_special_keys(label, key):
+    v = judge(ev([(key, False)]), label, **SEG)
+    assert v.status is None and v.observed_label == label
+
+
+def test_shift_target_then_a_letter_is_invalid():
+    v = judge(ev([("shift", False), ("r", True)]), "<shift>", **SEG)
+    assert v.status == Status.INVALID and v.keystrokes == 2
+
+
+def test_other_accepts_any_other_key_and_notes_the_difference():
+    v = judge(ev([("tab", False)]), "<other>", **SEG, prompted="enter")
+    assert v.status is None and v.observed_label == "<other>" and "prompted Enter, pressed Tab" in v.note
+
+
 def test_wrong_key_is_mismatch():
-    v = judge([KeyEvent("s", 150 * MS)], "ㄱ", **SEG)
+    v = judge(ev([("s", False)]), "ㄱ", **SEG)
     assert v.status == Status.MISMATCH and v.observed_label == "ㄴ"
-
-
-def test_shift_confusion_hints_at_caps_lock():
-    v = judge([KeyEvent("R", 150 * MS)], "ㄱ", **SEG)
-    assert v.status == Status.MISMATCH and "Caps Lock" in v.note
 
 
 def test_no_key_is_invalid():
@@ -56,7 +143,7 @@ def test_no_key_is_invalid():
 
 
 def test_key_outside_recorded_audio_is_invalid():
-    v = judge([KeyEvent("r", -200 * MS)], "ㄱ", **SEG)  # pressed during the countdown
+    v = judge([KeyEvent("r", -200 * MS)], "ㄱ", **SEG)
     assert v.status == Status.INVALID and "outside the recorded audio" in v.note
     assert v.observed_label == "ㄱ" and v.keystrokes == 0
 
@@ -71,14 +158,9 @@ def test_two_keys_in_one_recording_is_invalid():
     assert v.status == Status.INVALID and v.keystrokes == 2
 
 
-def test_hangul_ime_is_invalid_with_hint():
+def test_hangul_from_a_terminal_ime_is_invalid_with_hint():
     v = judge([KeyEvent("ㄱ", 150 * MS)], "ㄱ", **SEG)
     assert v.status == Status.INVALID and "English" in v.note
-
-
-def test_non_jamo_key_is_invalid():
-    v = judge([KeyEvent(" ", 150 * MS)], "ㄱ", **SEG)
-    assert v.status == Status.INVALID and "SPACE" in v.note
 
 
 def test_operator_digit_during_recording_is_invalid():
@@ -91,36 +173,109 @@ def test_operator_digit_after_recording_is_fine():
     assert v.status is None
 
 
+# -- keyboard hook normalization (no pynput needed) ----------------------------
+
+
+class _Key:
+    def __init__(self, char=None, name=None, vk=None):
+        self.char, self.name, self.vk = char, name, vk
+
+
+def _hook():
+    events = []
+    return HookState(events.append), events
+
+
+def test_hook_tracks_shift_and_ignores_letter_case():
+    state, events = _hook()
+    state.press(None, "shift_l", None)
+    state.press("R", None, 82)  # Shift held
+    state.release("R", None, 82)
+    state.release(None, "shift_l", None)
+    state.press("R", None, 82)  # Caps Lock on, no Shift: still plain ㄱ
+    assert [(e.key, e.shift) for e in events] == [("shift", False), ("r", True), ("r", False)]
+    assert keylog.symbol_of(events[1]) == "ㄲ" and keylog.symbol_of(events[2]) == "ㄱ"
+
+
+def test_hook_drops_auto_repeat():
+    state, events = _hook()
+    for _ in range(5):
+        state.press("r", None, 114)  # held key: the OS repeats the key-down
+    state.release("r", None, 114)
+    state.press("r", None, 114)
+    assert [e.key for e in events] == ["r", "r"]
+
+
+def test_hook_counts_a_key_whose_release_never_comes_again_after_a_pause():
+    """Windows reports no release for 한/영 (VK_HANGUL, 0x15): a second
+    tap seconds later is a new keystroke, not auto-repeat."""
+    state, events = _hook()
+    state.press(None, None, 0x15, t_ns=0)
+    state.press(None, None, 0x15, t_ns=3_000 * MS)
+    state.press("r", None, 114, t_ns=4_000 * MS)
+    for k in range(1, 40):  # held: first repeat after 500 ms, then every 33 ms
+        state.press("r", None, 114, t_ns=4_000 * MS + 500 * MS + k * 33 * MS)
+    assert [(e.key, e.t_ns) for e in events] == [("vk21", 0), ("vk21", 3_000 * MS), ("r", 4_000 * MS)]
+    assert keylog.symbol_of(events[0]) == "<other>"
+
+
+def test_hook_normalizes_names_symbols_and_hangul_layouts():
+    assert normalize_key(None, "shift_r", None) == ("shift", False)
+    assert normalize_key(None, "caps_lock", None) == ("caps_lock", False)
+    assert normalize_key("!", None, 49) == ("1", False)  # Shift+1 is still the 1 key
+    assert normalize_key("ㄲ", None, None) == ("r", True)
+    assert normalize_key(None, None, 0x52) == ("r", False)  # Windows VK_R
+
+
+def test_hook_digit_with_shift_is_still_a_control():
+    state, events = _hook()
+    state.press(None, "shift", None)
+    state.press("!", None, 49)
+    assert events[-1].key == "1" and KEYMAP[events[-1].key] == "repeat"
+
+
 # -- engine ----------------------------------------------------------------
 
 
 def _config(tmp_path, **overrides):
-    trial = {"repetitions_per_class": 1, "countdown_ms": 0, "pre_roll_ms": 20, "input_window_ms": 20,
-             "post_roll_ms": 20, "inter_trial_ms": 0}
+    trial = {"repetitions_per_class": 1, "countdown_ms": 0, "pre_roll_ms": 30, "input_window_ms": 30,
+             "post_roll_ms": 30, "inter_trial_ms": 0}
     trial.update(overrides.pop("trial", {}))
     overrides["trial"] = trial
     overrides.setdefault("output", {})["root"] = str(tmp_path / "data")
-    overrides.setdefault("input", {}).setdefault("key_detection", "terminal")
+    overrides.setdefault("input", {}).setdefault("key_detection", "hook")
     return config_from_dict(base_config_dict(**overrides))
 
 
 class Participant(Display):
-    """Types when the screen says PRESS, into the same control source the
-    terminal would feed. `answer(trial_number, target)` returns the key(s)
-    to type, or None to type nothing."""
+    """Types when the screen says PRESS. `answer(n, target, repetition)`
+    returns the label to type (or None for nothing)."""
 
     def __init__(self, source, answer):
         super().__init__(enabled=True, interactive=False)
-        self.source = source
-        self.answer = answer
+        self.source, self.answer = source, answer
         self.n = 0
 
     def show(self, text):
         if "PRESS" in text:
             self.n += 1
             target = text.split("PRESS")[1].split()[0]
-            for key in self.answer(self.n, target) or []:
-                self.source.push_key(key)
+            rep = self.rep_of(text)
+            label = self.answer(self.n, target, rep)
+            if label == "RAW-HANGUL":
+                self.source.push_key(target)
+            elif label is not None:
+                press(self.source, label, rep)
+
+    @staticmethod
+    def rep_of(text):
+        # <other> prompts are shown in the hint; recover the repetition from it
+        if "(press " in text:
+            shown = text.split("(press ")[1].split(")")[0]
+            for rep in range(1, len(keylog.OTHER_KEYS) + 1):
+                if keylog.display_name(keylog.OTHER_KEYS[rep - 1]) == shown:
+                    return rep
+        return 1
 
     def line(self, text):
         pass
@@ -133,23 +288,23 @@ def _run(config, answer):
     return engine, summary, read_manifest_jsonl(engine.session_dir / "manifest.jsonl")
 
 
-def test_correct_typing_records_observed_label_and_time(tmp_path):
-    engine, summary, rows = _run(_config(tmp_path), lambda n, target: [KEY_FOR[target]])
-    assert summary.completed is True
+def test_all_38_classes_are_typed_verified_and_recorded(tmp_path):
+    engine, summary, rows = _run(_config(tmp_path), lambda n, target, rep: target)
+    assert summary.completed is True, summary.stop_reason
+    assert sorted(r["label"] for r in rows) == sorted(CLASSES)
     for r in rows:
-        assert r["status"] == "valid"
+        assert r["status"] == "valid", r
         assert r["observed_label"] == r["label"] and r["keystrokes"] == 1
         assert r["trial_start_ns"] <= r["input_detected_ns"] <= r["trial_end_ns"]
-    session = json.loads((engine.session_dir / "session.json").read_text())
-    assert session["implementation_decisions"]["keystroke_detection"].startswith("terminal")
+    session = json.loads((engine.session_dir / "session.json").read_text(encoding="utf-8"))
+    assert session["implementation_decisions"]["keystroke_detection"].startswith("hook")
+    assert "<other>" in session["implementation_decisions"]["other_class"]
     assert validate_session(engine.session_dir).passed
 
 
 def test_wrong_key_is_mismatch_and_re_recorded(tmp_path):
-    def answer(n, target):
-        if n == 1:
-            return [KEY_FOR["ㅎ" if target != "ㅎ" else "ㅁ"]]
-        return [KEY_FOR[target]]
+    def answer(n, target, rep):
+        return ("ㅎ" if target != "ㅎ" else "ㅁ") if n == 1 else target
 
     engine, summary, rows = _run(_config(tmp_path), answer)
     first = rows[0]
@@ -159,15 +314,35 @@ def test_wrong_key_is_mismatch_and_re_recorded(tmp_path):
     assert summary.completed is True
 
 
-def test_unfocused_terminal_stops_with_the_reason(tmp_path):
-    engine, summary, rows = _run(_config(tmp_path), lambda n, target: None)
+def test_no_typing_stops_with_the_reason(tmp_path):
+    engine, summary, rows = _run(_config(tmp_path), lambda n, target, rep: None)
     assert summary.completed is False
     assert "no keystroke detected" in summary.stop_reason
     assert [r["status"] for r in rows] == ["invalid"] * 3
 
 
-def test_hangul_ime_stops_with_the_reason(tmp_path):
-    engine, summary, rows = _run(_config(tmp_path), lambda n, target: [target])
+def test_terminal_detection_is_refused_when_classes_include_shift_or_caps(tmp_path):
+    engine = SessionEngine(_config(tmp_path, input={"key_detection": "terminal"}), backend=SyntheticBackend(),
+                           mic_test_duration_s=0.2)
+    with pytest.raises(PreflightError, match="key_detection: hook"):
+        engine.run(control_source=QueueControlSource())
+
+
+def test_terminal_detection_still_works_for_a_jamo_only_class_list(tmp_path, monkeypatch):
+    from experiments.recording import labels as labels_module
+
+    monkeypatch.setattr(labels_module, "load_classes", lambda: (JAMO, "jamo-only-test"))
+    config = _config(tmp_path, input={"key_detection": "terminal"})
+    engine, summary, rows = _run(config, lambda n, target, rep: target)
+    assert summary.completed is True and len(rows) == len(JAMO)
+
+
+def test_hangul_ime_in_terminal_mode_stops_with_the_hint(tmp_path, monkeypatch):
+    from experiments.recording import labels as labels_module
+
+    monkeypatch.setattr(labels_module, "load_classes", lambda: (JAMO, "jamo-only-test"))
+    config = _config(tmp_path, input={"key_detection": "terminal"})
+    engine, summary, rows = _run(config, lambda n, target, rep: "RAW-HANGUL")
     assert "English" in summary.stop_reason
     assert all(r["status"] == "invalid" for r in rows)
 
@@ -178,13 +353,14 @@ def test_resume_refuses_a_key_detection_change(tmp_path):
     config = _config(tmp_path, input={"key_detection": "none"})
     SessionEngine(config, backend=SyntheticBackend(), mic_test_duration_s=0.2).run(
         control_source=ControlsAtTrial({2: ["quit"]}))
-    changed = _config(tmp_path, input={"key_detection": "terminal"})
+    changed = _config(tmp_path, input={"key_detection": "hook"})
     with pytest.raises(PreflightError, match="key_detection"):
         SessionEngine(changed, backend=SyntheticBackend(), mic_test_duration_s=0.2).run(
             resume=True, control_source=QueueControlSource())
 
 
-def test_terminal_reader_timestamps_keys_and_maps_digits(monkeypatch):
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pseudo-terminal")
+def test_terminal_reader_timestamps_and_normalizes_keys(monkeypatch):
     """The real TerminalControlSource, driven through a pseudo-terminal."""
     import os
     import pty
@@ -194,19 +370,19 @@ def test_terminal_reader_timestamps_keys_and_maps_digits(monkeypatch):
     from experiments.recording.ui import TerminalControlSource
 
     master, slave = pty.openpty()
-    fake_stdin = os.fdopen(slave, "r")
+    fake_stdin = os.fdopen(slave, "r", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", fake_stdin)
     source = TerminalControlSource()
     try:
         assert source.interactive
-        before = time.monotonic_ns()
-        os.write(master, "r".encode())
+        before = clock.now_ns()
+        os.write(master, "R".encode())
         time.sleep(0.3)
         os.write(master, "1".encode())
         time.sleep(0.3)
         keys = source.poll_keys()
-        assert [k.key for k in keys] == ["r", "1"]
-        assert before <= keys[0].t_ns < keys[1].t_ns <= time.monotonic_ns()
+        assert [(k.key, k.shift) for k in keys] == [("r", True), ("1", False)]
+        assert before <= keys[0].t_ns < keys[1].t_ns <= clock.now_ns()
         assert source.poll() == "repeat" and source.poll() is None
     finally:
         source.close()
