@@ -42,6 +42,8 @@ from .trial import (
     TrialClock,
     TrialDurations,
     TrialStateMachine,
+    estimated_trial_ms,
+    stored_ms,
     utc_now_iso,
 )
 from .writer import (
@@ -184,6 +186,11 @@ class SessionEngine:
                 ("random_seed", prior.get("random_seed"), sched.seed),
                 ("repetitions_per_class", prior.get("repetitions_per_class"), cfg.trial.repetitions_per_class),
             ]
+            checks.append((
+                "trial.capture",
+                ((prior.get("resolved_config") or {}).get("trial") or {}).get("capture", "scheduled"),
+                cfg.trial.capture,
+            ))
             for key in ("countdown_ms", "pre_roll_ms", "input_window_ms", "post_roll_ms", "inter_trial_ms"):
                 checks.append((key, prior.get(key), getattr(cfg.trial, key)))
         for field, old, new in checks:
@@ -318,7 +325,7 @@ class SessionEngine:
 
         required_bytes = hardware.estimate_bytes(
             total_trials=expected_total,
-            stored_ms=cfg.trial.pre_roll_ms + cfg.trial.input_window_ms + cfg.trial.post_roll_ms,
+            stored_ms=stored_ms(cfg.trial),
             sample_rate=cfg.recording.sample_rate,
             channels=cfg.recording.channels,
         )
@@ -430,6 +437,12 @@ class SessionEngine:
             )
             self._recorder.start()
             log.info("audio stream opened: %s", self._recorder.device_info)
+            if cfg.trial.capture == "keypress":
+                # A keystroke is cut with pre_roll_ms of audio before it; make
+                # sure that much exists before the first PRESS appears.
+                self._recorder.wait_until(
+                    cfg.trial.pre_roll_ms * cfg.recording.sample_rate // 1000, timeout_s=cfg.trial.pre_roll_ms / 1000 + 5
+                )
             while self._queue and stop_reason is None:
                 stop_reason = self._run_trial(self._queue.pop(0), manifest)
         except RecorderError as exc:
@@ -503,16 +516,37 @@ class SessionEngine:
         def on_countdown(seconds_left: int) -> None:
             self._render(t, f"{seconds_left}")
 
+        keypress = cfg.trial.capture == "keypress"
+        waited_keys: list = []
+        wait_info: dict = {}
+
+        def on_phase_change_capture(phase: Phase) -> None:
+            if keypress and phase == Phase.INPUT_WINDOW:
+                self._render(t, f"PRESS   {t.label}   (take your time)")
+            else:
+                on_phase_change(phase)
+
         log.info("trial start id=%d label=%s rep=%d", t.trial_id, t.label, t.repetition)
         machine = TrialStateMachine(self._durations, session_start_ns=int(self._run_start * 1e9), clock=TrialClock())
-        result = machine.run(
-            trial_id=t.trial_id,
-            label=t.label,
-            repetition=t.repetition,
-            input_mode=InputMode(cfg.input.mode),
-            on_phase_change=on_phase_change,
-            on_countdown=on_countdown,
-        )
+        if keypress:
+            result = machine.run_keypress(
+                trial_id=t.trial_id,
+                label=t.label,
+                repetition=t.repetition,
+                input_mode=InputMode(cfg.input.mode),
+                wait_for_key=lambda shown_ns: self._wait_for_key(t, shown_ns, waited_keys, wait_info),
+                on_phase_change=on_phase_change_capture,
+                on_countdown=on_countdown,
+            )
+        else:
+            result = machine.run(
+                trial_id=t.trial_id,
+                label=t.label,
+                repetition=t.repetition,
+                input_mode=InputMode(cfg.input.mode),
+                on_phase_change=on_phase_change,
+                on_countdown=on_countdown,
+            )
         # The inter-trial gap belongs to this trial's key window: a key
         # pressed right after the keystroke still applies to this trial.
         if self._queue:
@@ -520,17 +554,33 @@ class SessionEngine:
         if self._durations.inter_trial_ms > 0:
             time.sleep(self._durations.inter_trial_ms / 1000.0)
         controls = self._drain_controls()
-        key_events = self._controls.poll_keys()
+        key_events = waited_keys + self._controls.poll_keys()
         stale = [e for e in key_events if e.t_ns < result.timing.trial_start_ns]
         if stale:
             self._log.info("discarded %d key(s) pressed before trial %d began", len(stale), t.trial_id)
         key_events = [e for e in key_events if e.t_ns >= result.timing.trial_start_ns]
 
-        start = offsets.get(Phase.PRE_ROLL, self._recorder.frames_captured)
-        end = offsets.get(Phase.SAVE, self._recorder.frames_captured)
+        expected = stored_ms(cfg.trial) * cfg.recording.sample_rate / 1000.0
+        if keypress:
+            # The recording is cut around the keystroke after the fact: the
+            # audio before it is already in the ring buffer.
+            buf = self._recorder.buffer
+            segment_start_ns = result.anchor_ns - cfg.trial.pre_roll_ms * 1_000_000
+            # One conversion, then a fixed length: every file is exactly
+            # pre_roll + post_roll long (REQ-40.1), whatever the jitter.
+            start = max(0, buf.sample_at(segment_start_ns))
+            end = start + int(round(expected))
+            try:
+                self._recorder.wait_until(end, timeout_s=2.0)
+            except AudioStreamError:
+                end = min(end, self._recorder.frames_captured)
+        else:
+            segment_start_ns = pre_roll_ns.get("t", result.timing.input_expected_ns)
+            start = offsets.get(Phase.PRE_ROLL, self._recorder.frames_captured)
+            end = offsets.get(Phase.SAVE, self._recorder.frames_captured)
         num_samples = max(0, end - start)
-        expected = self._durations.stored_ms * cfg.recording.sample_rate / 1000.0
         stalled = num_samples < STALL_FRACTION * expected
+        no_key_by_control = keypress and result.timing.input_detected_ns is None and wait_info.get("reason") == "control"
 
         status = Status.VALID
         notes: list = []
@@ -572,11 +622,11 @@ class SessionEngine:
             log.warning("suspicious silence in trial %d rms=%.6f", t.trial_id, metrics.rms)
 
         verdict = None
-        if cfg.input.key_detection == "terminal":
+        if cfg.input.key_detection == "terminal" and not no_key_by_control:
             verdict = keylog.judge(
                 key_events,
                 scheduled_label=t.label,
-                segment_start_ns=pre_roll_ns.get("t", result.timing.input_expected_ns),
+                segment_start_ns=segment_start_ns,
                 segment_end_ns=result.timing.trial_end_ns,
                 input_expected_ns=result.timing.input_expected_ns,
                 control_keys=set(ui.KEYMAP),
@@ -589,6 +639,8 @@ class SessionEngine:
                 log.warning("keystroke check failed for trial %d: %s", t.trial_id, verdict.note)
             if verdict.note:
                 notes.append(verdict.note)
+            if wait_info.get("reason") == "timeout":
+                notes.append(f"no key within the {cfg.trial.input_window_ms / 1000:.0f} s wait (trial.input_window_ms)")
         if metrics.clipping_ratio > cfg.quality.clipping_threshold:
             self._notice = f"clipping {metrics.clipping_ratio:.4f} on trial {t.trial_id} — check input gain"
             log.warning("clipping ratio %.6f on trial %d", metrics.clipping_ratio, t.trial_id)
@@ -608,6 +660,10 @@ class SessionEngine:
         elif pause and cfg.controls.resume_policy == "discard_current":
             status = Status.INTERRUPTED
             notes.append("discarded by operator pause (resume_policy=discard_current)")
+        if no_key_by_control and status not in (Status.SKIPPED, Status.OPERATOR_MARKED_INVALID, Status.CORRUPTED):
+            # Nothing was typed: there is no trial to keep, only to re-run.
+            status = Status.INTERRUPTED
+            notes.append("wait for the keystroke ended by an operator key")
 
         if status in (Status.VALID, Status.SKIPPED):
             requeue = None
@@ -710,6 +766,36 @@ class SessionEngine:
         ):
             return self._automatic_break()
         return None
+
+    def _wait_for_key(self, t: ScheduledTrial, shown_ns: int, collected: list, info: dict) -> Optional[int]:
+        """capture=keypress: block until the participant presses a key after
+        PRESS appeared. Returns its monotonic time, or None when the wait
+        ends without one (timeout, operator digit, Ctrl+C). Every key seen
+        is appended to `collected` for the keystroke check."""
+        limit_ms = self.config.trial.input_window_ms
+        deadline = shown_ns + limit_ms * 1_000_000 if limit_ms > 0 else None
+        warned = False
+        while True:
+            for e in self._controls.poll_keys():
+                collected.append(e)
+                if e.key in ui.KEYMAP:
+                    info["reason"] = "control"
+                    return None
+                if e.t_ns < shown_ns:
+                    if not warned:
+                        self._render(t, f"PRESS   {t.label}   (take your time)",
+                                     notice="too early — wait until PRESS appears, then press")
+                        warned = True
+                    continue
+                info["reason"] = "key"
+                return e.t_ns
+            if self._sigint:
+                info["reason"] = "control"
+                return None
+            if deadline is not None and time.monotonic_ns() >= deadline:
+                info["reason"] = "timeout"
+                return None
+            time.sleep(0.002)
 
     def _integrity_problem(self, wav_path: Path, num_samples: int) -> Optional[str]:
         """REQ-40.1 post-write check. Returns a description of the first
@@ -888,6 +974,7 @@ class SessionEngine:
                 break
             time.sleep(0.05)
         self._record_break(nxt, time.monotonic() - started, "operator")
+        self._controls.poll_keys()  # keys typed while paused belong to no trial
         self._log.info("resume after pause")
         self._save_progress(progress_mod.STATE_RUNNING)
         return reason
@@ -911,6 +998,7 @@ class SessionEngine:
                 break
             time.sleep(min(0.2, left))
         self._record_break(nxt, time.monotonic() - started, "automatic")
+        self._controls.poll_keys()
         self._log.info("break end")
         self._save_progress(progress_mod.STATE_RUNNING)
         return reason
@@ -941,8 +1029,7 @@ class SessionEngine:
             recent = self._trial_seconds[-50:]
             per_trial = sum(recent) / len(recent)
         else:
-            d = self._durations
-            per_trial = (d.countdown_ms + d.stored_ms + d.inter_trial_ms) / 1000.0
+            per_trial = estimated_trial_ms(self.config.trial) / 1000.0
         return per_trial * (len(self._queue) + 1)
 
     def _render(self, t: ScheduledTrial, status: str, notice: Optional[str] = None) -> None:

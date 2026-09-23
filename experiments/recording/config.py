@@ -57,6 +57,11 @@ class RecordingSection:
 
 @dataclasses.dataclass(frozen=True)
 class TrialSection:
+    # scheduled: fixed pre-roll / input window / post-roll timeline (REQ-22).
+    # keypress: wait for the keystroke (up to input_window_ms, 0 = no limit)
+    #   and store pre_roll_ms before to post_roll_ms after it, cut from the
+    #   continuous ring buffer.
+    capture: str
     repetitions_per_class: int
     countdown_ms: int
     pre_roll_ms: int
@@ -221,6 +226,7 @@ _SECTION_FIELDS = {
         "allow_resample": (_BOOL, False),
     },
     "trial": {
+        "capture": (_STR, False),
         "repetitions_per_class": (_INT, False),
         "countdown_ms": (_INT, False),
         "pre_roll_ms": (_INT, False),
@@ -289,6 +295,7 @@ _VALID_FORMATS = {"PCM_16"}
 _VALID_STRATEGIES = {"random", "balanced_random", "block_random", "manual"}
 _VALID_INPUT_MODES = {"human", "automated"}
 _VALID_KEY_DETECTION = {"terminal", "none"}
+_VALID_CAPTURE = {"scheduled", "keypress"}
 _VALID_RESUME_POLICIES = {"discard_current", "continue_current"}
 _VALID_DUPLICATE_POLICIES = {"error", "new_id"}
 
@@ -363,6 +370,28 @@ def validate_config_dict(raw: dict) -> dict:
         v = raw["trial"][k]
         if v < 0:
             raise ConfigError(f"trial.{k}: must be >= 0, got {v}")
+
+    capture = raw["trial"]["capture"]
+    if capture not in _VALID_CAPTURE:
+        raise ConfigError(f"trial.capture: must be one of {sorted(_VALID_CAPTURE)}, got {capture!r}")
+    if capture == "keypress":
+        if raw["input"]["key_detection"] != "terminal":
+            raise ConfigError(
+                "trial.capture: keypress needs input.key_detection: terminal "
+                "(the recording is cut around the detected keystroke)"
+            )
+        t = raw["trial"]
+        if t["post_roll_ms"] <= 0:
+            raise ConfigError("trial.post_roll_ms: must be > 0 with capture: keypress (the key release is in it)")
+        # The previous keystroke happened at least post_roll + gap + countdown
+        # before this PRESS appears; keeping that >= pre_roll guarantees it
+        # can never fall inside this trial's pre-roll.
+        if t["post_roll_ms"] + t["inter_trial_ms"] + t["countdown_ms"] < t["pre_roll_ms"]:
+            raise ConfigError(
+                "trial: with capture: keypress, post_roll_ms + inter_trial_ms + countdown_ms "
+                f"({t['post_roll_ms'] + t['inter_trial_ms'] + t['countdown_ms']}) must be >= pre_roll_ms "
+                f"({t['pre_roll_ms']}), or the previous keystroke can land in this trial's pre-roll"
+            )
 
     if raw["input"]["mode"] not in _VALID_INPUT_MODES:
         raise ConfigError(

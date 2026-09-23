@@ -17,6 +17,7 @@ def base_config_dict(**overrides) -> dict:
             "allow_resample": False,
         },
         "trial": {
+            "capture": "scheduled",
             "repetitions_per_class": 3,
             "countdown_ms": 0,
             "pre_roll_ms": 10,

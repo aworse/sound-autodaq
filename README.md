@@ -91,6 +91,44 @@ priority order, so the controls are digits. Letter, jamo and space keys
 never act as controls. With key detection on, they are used to verify
 the keystroke (next section).
 
+## Recording on the keystroke (`trial.capture: keypress`)
+
+This is the reference config's setting. There is no reaction-time
+pressure. After the countdown the screen shows `PRESS ㄱ (take your
+time)` and **waits for the key**, for up to `input_window_ms` (0 means
+no limit). Then:
+
+```
+microphone: ──────────── always recording into the ring buffer ────────────
+you:                           ...thinking...   press ㄱ
+saved file:                          |← pre_roll →|← post_roll →|
+                                     cut out of the buffer afterwards
+```
+
+The audio *before* the keystroke is not recorded in advance: the
+microphone never stops, so those samples are already in memory. The
+recorder converts the keystroke's timestamp to a sample number and cuts
+`pre_roll_ms` before to `post_roll_ms` after it. Every file therefore
+has the same length (`pre_roll_ms + post_roll_ms`), with the keystroke
+at the same offset. In the synthetic end-to-end test, the keystroke
+lands within a few ms of `pre_roll_ms`, bounded by the audio block size.
+
+For the participant: press once when `PRESS` appears, release, and stay
+still until `saved`. A key pressed during the countdown does not count
+(the screen says "too early"). If no key comes within `input_window_ms`,
+the trial is `invalid` and re-recorded. A digit key while waiting
+(for example `0`) ends the wait: the trial is marked `interrupted` and
+re-recorded later, not counted as a failure.
+
+This needs `input.key_detection: terminal`. It also needs
+`post_roll_ms + inter_trial_ms + countdown_ms >= pre_roll_ms`, so that
+the previous keystroke can never fall inside this one's pre-roll; the
+config validator enforces this. `trial.capture: scheduled` keeps the
+spec's fixed REQ-22 timeline. The capture mode is part of the session: a
+resume that changes it is refused. This mode deviates from REQ-22's
+fixed timeline, and the deviation is recorded in every `session.json`
+under `implementation_decisions.capture`.
+
 ## Keystroke verification (`input.key_detection`)
 
 With `key_detection: terminal` (the reference config's setting), the
@@ -136,6 +174,8 @@ class count from `len(CLASSES)`.
 These are also written into every `session.json` under
 `implementation_decisions`:
 
+- **Capture mode:** `trial.capture` (see above), recorded in
+  `session.json`.
 - **E.1 keystroke detection:** chosen per session by
   `input.key_detection` (see above) and recorded in `session.json`.
 - **E.2 out-of-window keystrokes:** no new status value, so no schema

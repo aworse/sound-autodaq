@@ -21,10 +21,12 @@ recording:
   allow_resample: false
 
 trial:
+  capture: keypress         # keypress: wait for the key, keep pre_roll_ms before and post_roll_ms after it
+                            # scheduled: fixed pre-roll / input window / post-roll timeline (REQ-22)
   repetitions_per_class: 500
   countdown_ms: 1000
   pre_roll_ms: 500
-  input_window_ms: 500
+  input_window_ms: 10000    # keypress: longest wait for the key (0 = no limit); scheduled: window length
   post_roll_ms: 500
   inter_trial_ms: 500
 

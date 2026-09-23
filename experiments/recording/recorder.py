@@ -13,6 +13,7 @@ every line of buffering / segmentation / quality code.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import threading
 import time
@@ -192,10 +193,10 @@ class SyntheticBackend(AudioBackend):
     recomputing the expected samples directly from the index (REQ-61.3),
     with no dependency on real time or hardware.
 
-    Runs its generator in a background thread that produces frames as
-    fast as the consumer's callback returns, with no artificial sleep —
-    a full 19,000-trial synthetic session runs in test time, not wall
-    time.
+    Runs its generator in a background thread paced to real time in ~2 ms
+    blocks, like a low-latency device, so trial phase timing, keypress
+    timestamps and captured sample counts relate exactly as they would on
+    hardware.
     """
 
     def __init__(self, overflow_at_samples: Optional[set] = None, amplitude: int = 1000):
@@ -280,13 +281,17 @@ class RingBuffer:
     the writer thread's worst-case lag (REQ-15.5).
     """
 
-    def __init__(self, capacity_frames: int, channels: int):
+    def __init__(self, capacity_frames: int, channels: int, sample_rate: int = 48000):
         self.capacity = capacity_frames
         self.channels = channels
+        self.sample_rate = sample_rate
         self._buf = np.zeros((capacity_frames, channels), dtype=np.int16)
         self._lock = threading.Lock()
         self.total_written = 0
         self._overflow_events: list = []
+        # (time.monotonic_ns() when a block arrived, total samples by then):
+        # lets a keypress timestamp be turned into a sample index.
+        self._anchors: collections.deque = collections.deque(maxlen=4096)
 
     def write(self, frames: np.ndarray, overflow: bool) -> None:
         n = frames.shape[0]
@@ -301,8 +306,30 @@ class RingBuffer:
                 self._buf[pos:] = frames[:first]
                 self._buf[: end_pos - self.capacity] = frames[first:]
             self.total_written += n
+            self._anchors.append((time.monotonic_ns(), self.total_written))
             if overflow:
                 self._overflow_events.append(OverflowEvent(start, start + n))
+
+    def sample_at(self, t_ns: int) -> int:
+        """Absolute sample index captured at monotonic time `t_ns`.
+
+        Uses the latest block-arrival anchor at or before `t_ns` (the
+        earliest one if `t_ns` predates them all) and the nominal sample
+        rate from there. The audio and monotonic clocks drift by parts per
+        million, so over the ~1 s spans this is used for, the error is set
+        by block delivery jitter, i.e. about one block (~10 ms on a real
+        device), not by the extrapolation.
+        """
+        with self._lock:
+            anchors = list(self._anchors)
+        if not anchors:
+            raise AudioStreamError("no audio has been captured yet")
+        t_a, frames_a = anchors[0]
+        for a_t, a_frames in anchors:
+            if a_t > t_ns:
+                break
+            t_a, frames_a = a_t, a_frames
+        return int(round(frames_a + (t_ns - t_a) * self.sample_rate / 1e9))
 
     def read_segment(self, start_sample: int, end_sample: int) -> np.ndarray:
         if start_sample < 0 or end_sample < start_sample:
@@ -361,7 +388,7 @@ class ContinuousRecorder:
                 f"{sample_rate} Hz / {channels} ch; implicit resampling is prohibited (REQ-16.3/16.4)"
             )
         capacity = max(sample_rate * 2, int(sample_rate * buffer_seconds))
-        self.buffer = RingBuffer(capacity_frames=capacity, channels=channels)
+        self.buffer = RingBuffer(capacity_frames=capacity, channels=channels, sample_rate=sample_rate)
         self._started = False
 
     def start(self) -> None:
