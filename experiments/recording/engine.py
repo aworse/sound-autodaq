@@ -775,6 +775,7 @@ class SessionEngine:
         limit_ms = self.config.trial.input_window_ms
         deadline = shown_ns + limit_ms * 1_000_000 if limit_ms > 0 else None
         warned = False
+        frames_at_check = {"n": self._recorder.frames_captured, "t": time.monotonic_ns()}
         while True:
             for e in self._controls.poll_keys():
                 collected.append(e)
@@ -792,6 +793,15 @@ class SessionEngine:
             if self._sigint:
                 info["reason"] = "control"
                 return None
+            if self.backend.error or self._recorder.frames_captured == frames_at_check.get("n", -1):
+                # An open-ended wait must not hide a dead microphone: give up
+                # when the backend reports an error or no audio has arrived
+                # for a whole second; the stall handling then stops safely.
+                if self.backend.error or time.monotonic_ns() - frames_at_check["t"] > 1_000_000_000:
+                    info["reason"] = "stream_error"
+                    return None
+            else:
+                frames_at_check.update(n=self._recorder.frames_captured, t=time.monotonic_ns())
             if deadline is not None and time.monotonic_ns() >= deadline:
                 info["reason"] = "timeout"
                 return None

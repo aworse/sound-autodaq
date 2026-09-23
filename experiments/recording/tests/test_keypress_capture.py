@@ -215,3 +215,82 @@ def test_sample_at_maps_monotonic_time_to_sample_index():
     # between and beyond blocks it advances at the nominal rate
     t_last, count_last = written[-1]
     assert abs(buf.sample_at(t_last + 100_000_000) - buf.sample_at(t_last) - 4800) <= 1
+
+
+def test_reference_config_waits_without_limit():
+    from pathlib import Path
+
+    from experiments.recording.config import load_config
+
+    cfg = load_config(Path(__file__).parents[3] / "configs" / "S01.yaml")
+    assert cfg.trial.capture == "keypress" and cfg.trial.input_window_ms == 0
+
+
+def test_unlimited_wait_accepts_a_slow_keystroke(tmp_path):
+    config = _config(tmp_path, trial={"input_window_ms": 0})
+    engine, summary, rows = _run(
+        config, lambda n: 1.5, extra=lambda n, source: source.push("quit") if n == 2 else None
+    )
+    assert [r["status"] for r in rows] == ["valid", "valid"]
+    for r in rows:
+        assert (r["input_detected_ns"] - r["input_expected_ns"]) / 1e9 >= 1.4
+
+
+def test_unlimited_wait_does_not_hide_a_dead_microphone(tmp_path):
+    from experiments.recording.errors import AudioStreamError
+    from experiments.recording.tests.test_engine_integration import _StallingBackend
+
+    config = _config(tmp_path, trial={"input_window_ms": 0})
+    engine = SessionEngine(config, backend=_StallingBackend(after=int(0.3 * SR)), mic_test_duration_s=0.1)
+    outcome = {}
+
+    def run():
+        try:
+            engine.run(control_source=QueueControlSource())  # nobody ever presses a key
+        except AudioStreamError as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=20)
+    assert not worker.is_alive(), "the session hung waiting for a key while the microphone was dead"
+    assert "stalled" in str(outcome.get("error"))
+    rows = read_manifest_jsonl(engine.session_dir / "manifest.jsonl")
+    assert rows and rows[-1]["status"] == "interrupted" and rows[-1]["requeue"] == "immediate"
+
+
+def test_hangul_ime_in_keypress_mode_stops_with_the_hint(tmp_path):
+    config = _config(tmp_path, trial={"input_window_ms": 0})
+    engine = SessionEngine(config, backend=ClickBackend(), mic_test_duration_s=0.2)
+    source = QueueControlSource()
+
+    class HangulTyper(Participant):
+        def show(self, text):
+            if "PRESS" in text and "too early" not in text:
+                source.push_key(text.split("PRESS")[1].split()[0])  # the jamo itself, as a Hangul IME sends it
+
+    summary = engine.run(control_source=source, display=HangulTyper(source, None, lambda n: None))
+    rows = read_manifest_jsonl(engine.session_dir / "manifest.jsonl")
+    assert [r["status"] for r in rows] == ["invalid"] * 3
+    assert "English" in summary.stop_reason
+
+
+def test_key_pressed_the_instant_press_appears_counts(tmp_path):
+    """The PRESS timestamp is taken before the screen is drawn, so a key
+    that arrives while it is being drawn is on time, not 'too early'."""
+    config = _config(tmp_path, trial={"input_window_ms": 2000})
+    engine = SessionEngine(config, backend=ClickBackend(), mic_test_duration_s=0.2)
+    source = QueueControlSource()
+
+    class Instant(Participant):
+        def show(self, text):
+            if "PRESS" in text and "too early" not in text:
+                self.n += 1
+                source.push_key(KEY_FOR[text.split("PRESS")[1].split()[0]])
+                if self.n == 3:
+                    source.push("quit")
+
+    engine.run(control_source=source, display=Instant(source, None, lambda n: None))
+    rows = read_manifest_jsonl(engine.session_dir / "manifest.jsonl")
+    assert [r["status"] for r in rows] == ["valid"] * 3
+    assert all(r["input_detected_ns"] >= r["input_expected_ns"] for r in rows)

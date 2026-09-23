@@ -95,8 +95,9 @@ the keystroke (next section).
 
 This is the reference config's setting. There is no reaction-time
 pressure. After the countdown the screen shows `PRESS ㄱ (take your
-time)` and **waits for the key**, for up to `input_window_ms` (0 means
-no limit). Then:
+time)` and **waits for the key as long as it takes**
+(`input_window_ms: 0`; a positive value sets a time limit instead).
+Then:
 
 ```
 microphone: ──────────── always recording into the ring buffer ────────────
@@ -115,10 +116,26 @@ lands within a few ms of `pre_roll_ms`, bounded by the audio block size.
 
 For the participant: press once when `PRESS` appears, release, and stay
 still until `saved`. A key pressed during the countdown does not count
-(the screen says "too early"). If no key comes within `input_window_ms`,
-the trial is `invalid` and re-recorded. A digit key while waiting
-(for example `0`) ends the wait: the trial is marked `interrupted` and
-re-recorded later, not counted as a failure.
+(the screen says "too early"). A digit key while waiting (for example
+`0` to quit, `4` to pause) ends the wait: the trial is marked
+`interrupted` and re-recorded later, not counted as a failure.
+
+Because the wait has no time limit:
+- **If the terminal window loses focus**, keypresses never reach the
+  recorder, so the screen simply stays at `PRESS`. There is no failure
+  count and no automatic stop. Click the recorder window and press
+  again. (With the input method in Hangul mode, keys *do* arrive, often
+  one keystroke late because of syllable composition. Those trials are
+  marked `invalid` with a "switch the input method to English" hint,
+  and three in a row stop the session.)
+- **A dead microphone does not leave the session hanging.** If the
+  audio backend reports an error, or no audio arrives for one second
+  while waiting, the trial is marked `interrupted` and the session stops
+  safely, ready to resume.
+
+With a positive `input_window_ms`, a trial that gets no key in time is
+instead marked `invalid` and re-recorded, and a run of those stops the
+session.
 
 This needs `input.key_detection: terminal`. It also needs
 `post_roll_ms + inter_trial_ms + countdown_ms >= pre_roll_ms`, so that

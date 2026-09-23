@@ -180,8 +180,10 @@ class TrialStateMachine:
         self._set_phase(Phase.PRE_ROLL, on_phase_change)
         self.clock.sleep_ms(self.durations.pre_roll_ms)
 
-        self._set_phase(Phase.INPUT_WINDOW, on_phase_change)
+        # Stamp before the callback that draws PRESS: a key pressed the
+        # moment it appears must count as on time, not early.
         timing.input_expected_ns = self.clock.monotonic_ns()
+        self._set_phase(Phase.INPUT_WINDOW, on_phase_change)
         if on_input_window:
             on_input_window()
         self.clock.sleep_ms(self.durations.input_window_ms)
@@ -234,8 +236,8 @@ class TrialStateMachine:
             self.clock.sleep_ms(step)
             remaining -= step
 
-        self._set_phase(Phase.INPUT_WINDOW, on_phase_change)
         timing.input_expected_ns = self.clock.monotonic_ns()
+        self._set_phase(Phase.INPUT_WINDOW, on_phase_change)
         key_ns = wait_for_key(timing.input_expected_ns)
         anchor = key_ns if key_ns is not None else self.clock.monotonic_ns()
         timing.input_detected_ns = key_ns
