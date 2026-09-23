@@ -111,10 +111,30 @@ KEYPRESS_CAPTURE_DECISION = (
 )
 
 
+HOOK_DETECTION_DECISION = (
+    "hook (E.1): physical key-downs from an OS keyboard hook (pynput), stamped with "
+    "time.monotonic_ns() in the hook callback. Shift for a chord comes from tracking the Shift key, "
+    "not from character case, so Caps Lock state and the input method do not matter; OS auto-repeat "
+    "is dropped (a held key is one keystroke). The first non-modifier key inside the recorded "
+    "segment gives observed_label and input_detected_ns; a Shift pressed just before a tense "
+    "consonant or ㅒ/ㅖ is that chord's modifier, any other Shift in the recording is an extra keystroke"
+)
+
+OTHER_CLASS_DECISION = (
+    "<other> is every key that is not a jamo key, Space, Backspace, Shift, Caps Lock or an operator "
+    "digit (no definition existed in aworse/classism). <other> trials prompt Enter, Tab, "
+    "\", . / ; ' [ ] - =\" in turn by repetition; any <other> key is accepted as the label and the "
+    "key actually pressed is kept in observed_key"
+)
+
+
 def implementation_decisions(key_detection: str, capture: str = "scheduled") -> dict:
     decisions = dict(IMPLEMENTATION_DECISIONS)
-    if key_detection == "terminal":
+    if key_detection in ("terminal", "hook"):
         decisions.update(KEY_DETECTION_DECISIONS)
+    if key_detection == "hook":
+        decisions["keystroke_detection"] = HOOK_DETECTION_DECISION
+    decisions["other_class"] = OTHER_CLASS_DECISION
     decisions["capture"] = (
         KEYPRESS_CAPTURE_DECISION if capture == "keypress"
         else "trial.capture = scheduled: fixed pre-roll / input window / post-roll timeline (REQ-22)"

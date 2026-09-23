@@ -73,7 +73,7 @@ class TrialSection:
 @dataclasses.dataclass(frozen=True)
 class InputSection:
     mode: str  # human | automated
-    key_detection: str  # terminal | none
+    key_detection: str  # hook | terminal | none
 
 
 @dataclasses.dataclass(frozen=True)
@@ -294,7 +294,7 @@ _TOP_LEVEL_SECTIONS = set(_SECTION_FIELDS) | {"hardware"}
 _VALID_FORMATS = {"PCM_16"}
 _VALID_STRATEGIES = {"random", "balanced_random", "block_random", "manual"}
 _VALID_INPUT_MODES = {"human", "automated"}
-_VALID_KEY_DETECTION = {"terminal", "none"}
+_VALID_KEY_DETECTION = {"hook", "terminal", "none"}
 _VALID_CAPTURE = {"scheduled", "keypress"}
 _VALID_RESUME_POLICIES = {"discard_current", "continue_current"}
 _VALID_DUPLICATE_POLICIES = {"error", "new_id"}
@@ -375,9 +375,9 @@ def validate_config_dict(raw: dict) -> dict:
     if capture not in _VALID_CAPTURE:
         raise ConfigError(f"trial.capture: must be one of {sorted(_VALID_CAPTURE)}, got {capture!r}")
     if capture == "keypress":
-        if raw["input"]["key_detection"] != "terminal":
+        if raw["input"]["key_detection"] not in ("hook", "terminal"):
             raise ConfigError(
-                "trial.capture: keypress needs input.key_detection: terminal "
+                "trial.capture: keypress needs input.key_detection: hook (or terminal) "
                 "(the recording is cut around the detected keystroke)"
             )
         t = raw["trial"]

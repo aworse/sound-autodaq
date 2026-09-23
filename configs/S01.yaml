@@ -33,8 +33,10 @@ trial:
 
 input:
   mode: human               # human | automated (automated is refused: not implemented)
-  key_detection: terminal   # terminal: verify each keystroke typed into the recorder terminal
-                            #   (IME must be in English mode, Caps Lock off); none: time-based only
+  key_detection: hook       # hook: OS keyboard hook sees every physical key, incl. Shift / Caps Lock
+                            #   (needs a desktop session: X11 on Linux, Accessibility permission on macOS)
+                            # terminal: keys typed into the recorder window (cannot see Shift / Caps Lock)
+                            # none: time-based only
 
 randomization:
   strategy: balanced_random

@@ -68,6 +68,10 @@ SYSTEM_FAILURES = {
     Status.MISMATCH,
 }
 
+# A terminal receives characters, not key presses: Shift or Caps Lock on
+# their own produce nothing it can read.
+TERMINAL_BLIND_CLASSES = {"<shift>", "<caps>"}
+
 # A trial that captured less than this fraction of its configured audio
 # means the stream stopped delivering samples (device stall/unplug).
 STALL_FRACTION = 0.5
@@ -240,6 +244,16 @@ class SessionEngine:
             expected_total > 0,
             f"{len(self.classes)} classes x {cfg.trial.repetitions_per_class} reps = {expected_total}",
         )
+
+        unseen = [c for c in self.classes if c in TERMINAL_BLIND_CLASSES]
+        if cfg.input.key_detection == "terminal" and unseen:
+            report.add(
+                "key detection can see every class",
+                False,
+                f"a terminal never receives a bare {' / '.join(unseen)} press, so those trials could never be "
+                "verified; use input.key_detection: hook",
+            )
+            return report
 
         state = progress_mod.session_dir_state(self.session_dir)
         if resume:
@@ -506,7 +520,7 @@ class SessionEngine:
             text = {
                 Phase.PREPARE: "READY",
                 Phase.PRE_ROLL: "get ready...",
-                Phase.INPUT_WINDOW: f"PRESS   {t.label}   NOW",
+                Phase.INPUT_WINDOW: f"PRESS   {t.label}   {keylog.prompt_hint(t.label, t.repetition)} NOW",
                 Phase.POST_ROLL: "recording... hold still",
                 Phase.SAVE: "saved",
             }.get(phase)
@@ -522,7 +536,7 @@ class SessionEngine:
 
         def on_phase_change_capture(phase: Phase) -> None:
             if keypress and phase == Phase.INPUT_WINDOW:
-                self._render(t, f"PRESS   {t.label}   (take your time)")
+                self._render(t, self._press_text(t))
             else:
                 on_phase_change(phase)
 
@@ -622,7 +636,7 @@ class SessionEngine:
             log.warning("suspicious silence in trial %d rms=%.6f", t.trial_id, metrics.rms)
 
         verdict = None
-        if cfg.input.key_detection == "terminal" and not no_key_by_control:
+        if cfg.input.key_detection in ("hook", "terminal") and not no_key_by_control:
             verdict = keylog.judge(
                 key_events,
                 scheduled_label=t.label,
@@ -630,6 +644,7 @@ class SessionEngine:
                 segment_end_ns=result.timing.trial_end_ns,
                 input_expected_ns=result.timing.input_expected_ns,
                 control_keys=set(ui.KEYMAP),
+                prompted=keylog.prompted_key(t.label, t.repetition),
             )
             # Keystroke evidence outranks silence (it says why) but not
             # capture failures, which make the audio itself untrustworthy.
@@ -782,9 +797,11 @@ class SessionEngine:
                 if e.key in ui.KEYMAP:
                     info["reason"] = "control"
                     return None
+                if not keylog.is_trigger(e, t.label, ui.KEYMAP):
+                    continue  # a chord's Shift: kept for the check, never the trigger
                 if e.t_ns < shown_ns:
                     if not warned:
-                        self._render(t, f"PRESS   {t.label}   (take your time)",
+                        self._render(t, self._press_text(t),
                                      notice="too early — wait until PRESS appears, then press")
                         warned = True
                     continue
@@ -1061,9 +1078,15 @@ class SessionEngine:
                 elapsed_s=time.monotonic() - self._run_start,
                 remaining_s=self._remaining_s(),
                 notice=notice or self._notice,
-                key_detection=cfg.input.key_detection == "terminal",
+                key_detection=cfg.input.key_detection,
+                hint=keylog.prompt_hint(t.label, t.repetition),
             )
         )
+
+    @staticmethod
+    def _press_text(t: ScheduledTrial) -> str:
+        hint = keylog.prompt_hint(t.label, t.repetition)
+        return f"PRESS   {t.label}   {hint} (take your time)".replace("  (", " (")
 
     # -- files --------------------------------------------------------------
 

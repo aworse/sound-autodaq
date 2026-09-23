@@ -69,7 +69,8 @@ validation failures.
 
 ## Operator controls
 
-Type these digits into the recorder's terminal:
+Press these digits (with `key_detection: hook` from any window; with
+`terminal`, into the recorder's terminal):
 
 | key | action |
 | --- | --- |
@@ -89,7 +90,8 @@ the IME in Latin mode would end the session. REQ-28.2 (controls must not
 collide with experimental keystrokes) takes precedence under the §2.7
 priority order, so the controls are digits. Letter, jamo and space keys
 never act as controls. With key detection on, they are used to verify
-the keystroke (next section).
+the keystroke (see below). The digit row is never a target: `<other>`
+trials prompt other keys.
 
 ## Recording on the keystroke (`trial.capture: keypress`)
 
@@ -121,13 +123,15 @@ still until `saved`. A key pressed during the countdown does not count
 `interrupted` and re-recorded later, not counted as a failure.
 
 Because the wait has no time limit:
-- **If the terminal window loses focus**, keypresses never reach the
-  recorder, so the screen simply stays at `PRESS`. There is no failure
-  count and no automatic stop. Click the recorder window and press
-  again. (With the input method in Hangul mode, keys *do* arrive, often
-  one keystroke late because of syllable composition. Those trials are
-  marked `invalid` with a "switch the input method to English" hint,
-  and three in a row stop the session.)
+- **With `key_detection: terminal`, if the terminal window loses
+  focus**, keypresses never reach the recorder, so the screen simply
+  stays at `PRESS`. There is no failure count and no automatic stop.
+  Click the recorder window and press again. (With the input method in
+  Hangul mode, keys *do* arrive, often one keystroke late because of
+  syllable composition. Those trials are marked `invalid` with a
+  "switch the input method to English" hint, and three in a row stop
+  the session.) The hook has neither problem: it sees physical keys
+  regardless of focus and input method.
 - **A dead microphone does not leave the session hanging.** If the
   audio backend reports an error, or no audio arrives for one second
   while waiting, the trial is marked `interrupted` and the session stops
@@ -137,7 +141,7 @@ With a positive `input_window_ms`, a trial that gets no key in time is
 instead marked `invalid` and re-recorded, and a run of those stops the
 session.
 
-This needs `input.key_detection: terminal`. It also needs
+This needs `input.key_detection: hook` (or `terminal`). It also needs
 `post_roll_ms + inter_trial_ms + countdown_ms >= pre_roll_ms`, so that
 the previous keystroke can never fall inside this one's pre-roll; the
 config validator enforces this. `trial.capture: scheduled` keeps the
@@ -148,43 +152,64 @@ under `implementation_decisions.capture`.
 
 ## Keystroke verification (`input.key_detection`)
 
-With `key_detection: terminal` (the reference config's setting), the
-participant types each target **into the recorder's terminal window**.
-Every key is timestamped on the same monotonic clock as the trial
-phases, then mapped through the dubeolsik layout. That gives each trial
-an independent `observed_label` and `input_detected_ns` (REQ-14.3),
-alongside `observed_key` and `keystrokes`:
+Each trial gets an independent `observed_label` and `input_detected_ns`
+(REQ-14.3), alongside `observed_key` and `keystrokes`. Every key is
+timestamped on the same monotonic clock as the trial phases and mapped
+through the dubeolsik layout to a class.
+
+- **`hook`** (the reference config's setting): an OS keyboard hook
+  (`pynput`) sees **physical keys** in any window, whatever the input
+  method or Caps Lock state, including a bare Shift or Caps Lock press.
+  Shift is tracked from the Shift key itself, not from letter case, so
+  ㄱ stays ㄱ after the `<caps>` trial turns Caps Lock on. Held keys
+  that auto-repeat count once. While the hook runs, the recorder's
+  terminal swallows typed characters so they do not pile up on screen.
+- **`terminal`**: the participant types into the recorder's terminal
+  window. A terminal only sees characters, so it **cannot see a bare
+  Shift or Caps Lock**; pre-flight refuses it when the class list
+  contains `<shift>` or `<caps>`. Focus, English input mode and Caps
+  Lock off are all required.
+- **`none`**: for a keyboard that is not connected to the recording
+  computer. The input window is purely time-based and `observed_label`
+  stays null.
 
 | what happened | status |
 | --- | --- |
-| the target jamo, once, inside the recorded audio | `valid` |
-| a different jamo | `mismatch`, then re-recorded |
-| no key / key outside the recorded audio / two keys in one recording / non-jamo key / Hangul IME / operator digit during the recording | `invalid`, then re-recorded |
+| the target key, once, inside the recorded audio | `valid` |
+| a different class (e.g. ㄱ for ㄲ: "hold Shift") | `mismatch`, then re-recorded |
+| no key / key outside the recorded audio / two keys in one recording / Hangul IME (terminal) / operator digit during the recording | `invalid`, then re-recorded |
 
-Requirements: the terminal window must have focus, the **input method
-must be in English mode**, and **Caps Lock must be off**. A Hangul IME
-composes jamo into syllables and delays them, so its characters are
-rejected with a hint to switch. If the setup is wrong, every trial
-fails the check, and the session stops after
-`quality.max_consecutive_failures` trials with the reason on screen
-(for example "no keystroke detected… is its window focused?"). It does
-not loop.
+If the setup is wrong, every trial fails the check, and the session
+stops after `quality.max_consecutive_failures` trials with the reason
+on screen. It does not loop. The mode is part of the session: a resume
+that changes it is refused.
 
-Use `key_detection: none` when the keyboard under test is not connected
-to the recording computer. The input window is then purely time-based
-and `observed_label` stays null. The mode is part of the session: a
-resume that changes it is refused.
+**Hook permissions.** Linux: needs an X11 session (under Wayland the
+hook only sees XWayland windows). macOS: grant the terminal app
+*Input Monitoring* (and *Accessibility*) in System Settings; how macOS
+reports Caps Lock through the hook is not yet verified on hardware, so
+check the `<caps>` trials in the pilot. Windows: no setup. If the hook
+cannot start, the recorder exits with the reason before opening audio.
 
-## Class definition: placeholder
+## Classes (`classism/labels.py`)
 
-`classism/labels.py` is a **stand-in**. The real classism class
-definition (38 classes per the spec) was not available here. The
-placeholder lists only the 33 jamo a single dubeolsik keystroke can
-produce: 19 consonants including the Shift doubles, and 14 vowels
-including ㅒ/ㅖ. Compound vowels such as ㅘ need two keystrokes and are
-excluded. Drop the project's real `labels.py` in before collecting
-training data. Nothing else changes, because the recorder derives the
-class count from `len(CLASSES)`.
+The 38 classes mirror `aworse/classism` (`CLASS_DEFINITION_VERSION =
+classism-afe-38@c6606a0`), in its order: 33 dubeolsik jamo, then
+`<sp> <bs> <shift> <caps> <other>`.
+
+| class | what the participant presses |
+| --- | --- |
+| 19 consonants, 14 vowels | the jamo's dubeolsik key; ㄲ ㄸ ㅃ ㅆ ㅉ ㅒ ㅖ as **Shift + key** (the screen says e.g. `ㄲ (Shift + ㄱ)`). The chord's Shift is part of the keystroke, not a second key. |
+| `<sp>` `<bs>` | Space, Backspace |
+| `<shift>` | Shift on its own, then release |
+| `<caps>` | Caps Lock (toggles; the hook does not care) |
+| `<other>` | the key on screen, cycled per repetition through Enter, Tab, `,` `.` `/` `;` `'` `[` `]` `-` `=` |
+
+`<other>` had no upstream definition, so this recorder defines it: **any
+key that is not a jamo key, Space, Backspace, Shift, Caps Lock or an
+operator digit**. The prompt rotates keys so the class covers more than
+one sound. Pressing a different `<other>` key still counts as `<other>`;
+the manifest notes which key it was.
 
 ## Implementation decisions (spec Appendix E)
 
@@ -216,7 +241,13 @@ These are also written into every `session.json` under
 
 ```bash
 python -m pytest experiments/recording/tests
+# with the real keyboard-hook tests (needs xvfb and xdotool):
+xvfb-run -a python -m pytest experiments/recording/tests
 ```
+
+Under Xvfb, `test_keyhook_x11.py` types all 38 classes as real X11 key
+events with xdotool and records a keypress-capture session through the
+real `pynput` hook. Without a display those tests are skipped.
 
 CI (`.github/workflows/tests.yml`) runs the linter, the full suite and
 a no-write dry run on Python 3.10–3.13 for every pull request and every

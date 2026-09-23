@@ -21,14 +21,18 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xdotool
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyflakes
       - name: Lint
         run: python -m pyflakes classism experiments
       # REQ-61.4: the hardware-free integration suite runs here and must pass
       # before any hardware session. The synthetic source runs in real time.
+      # Under Xvfb the keyboard-hook tests drive the real pynput hook with
+      # xdotool key events.
       - name: Tests
-        run: python -m pytest experiments/recording/tests -q
+        run: xvfb-run -a python -m pytest experiments/recording/tests -q -rs
       - name: Dry run of the reference configuration
         run: |
           python -m experiments.recording --config configs/S01.yaml --dry-run
