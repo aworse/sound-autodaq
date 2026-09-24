@@ -197,6 +197,16 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def cmd_export_classism(args: argparse.Namespace) -> int:
+    from .export_classism import export_session
+
+    if not args.out:
+        print("ERROR: --export-classism needs --out <dataset root>", file=sys.stderr)
+        return 1
+    print(export_session(args.export_classism, args.out).render())
+    return 0
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     from .webui.server import serve
 
@@ -213,6 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--validate", help="path to a session directory to validate")
     group.add_argument("--list-devices", action="store_true")
     group.add_argument("--dashboard", help="path to a session directory to view live in a browser")
+    group.add_argument("--export-classism", help="path to a session directory to export as classism training data")
 
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--device", default=None)
@@ -220,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--host", default="127.0.0.1", help="dashboard bind host")
     parser.add_argument("--port", type=int, default=8765, help="dashboard bind port")
+    parser.add_argument("--out", help="classism dataset root for --export-classism")
     return parser
 
 
@@ -247,6 +259,8 @@ def main(argv=None) -> int:
             return cmd_validate(args)
         if args.dashboard:
             return cmd_dashboard(args)
+        if args.export_classism:
+            return cmd_export_classism(args)
         return cmd_run(args)
     except RecorderError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
