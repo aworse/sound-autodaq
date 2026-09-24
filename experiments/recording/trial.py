@@ -13,6 +13,8 @@ import enum
 import time
 from typing import Optional
 
+from . import clock
+
 
 class Phase(str, enum.Enum):
     SCHEDULED = "scheduled"
@@ -97,7 +99,7 @@ class TrialClock:
     sleeps."""
 
     def monotonic_ns(self) -> int:
-        return time.monotonic_ns()
+        return clock.now_ns()
 
     def sleep_ms(self, ms: int) -> None:
         if ms > 0:

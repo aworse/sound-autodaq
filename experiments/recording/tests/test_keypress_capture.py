@@ -7,12 +7,14 @@ import time
 import numpy as np
 import pytest
 
+from experiments.recording import clock
 from experiments.recording.config import config_from_dict
 from experiments.recording.engine import SessionEngine
 from experiments.recording.errors import ConfigError
 from experiments.recording.recorder import RingBuffer, SyntheticBackend
 from experiments.recording.tests.helpers import base_config_dict
-from experiments.recording.tests.test_keylog import KEY_FOR
+from experiments.recording.tests.test_keylog import press
+from experiments.recording.tests.test_keylog import Participant as _Typist
 from experiments.recording.ui import Display, QueueControlSource
 from experiments.recording.validator import validate_session
 from experiments.recording.writer import read_manifest_jsonl, read_wav
@@ -27,7 +29,7 @@ def _config(tmp_path, **overrides):
     trial.update(overrides.pop("trial", {}))
     overrides["trial"] = trial
     overrides.setdefault("output", {})["root"] = str(tmp_path / "data")
-    overrides.setdefault("input", {"key_detection": "terminal"})
+    overrides.setdefault("input", {"key_detection": "hook"})
     return config_from_dict(base_config_dict(**overrides))
 
 
@@ -47,7 +49,7 @@ class ClickBackend(SyntheticBackend):
 
     def start(self, device_info, sample_rate, channels, callback):
         def with_clicks(block, overflow):
-            now = time.monotonic_ns()
+            now = clock.now_ns()
             with self._lock_clicks:
                 due = [c for c in self.clicks if c <= now]
                 self.clicks = [c for c in self.clicks if c > now]
@@ -70,25 +72,28 @@ class Participant(Display):
         self.timers = []
         self.pressed_at: list = []
 
-    def _press(self, key):
-        t = time.monotonic_ns()
+    def _press(self, label, rep=1):
+        """Type the target (a chord for tense consonants / ㅒㅖ); the click
+        goes into the audio at the main key-down."""
+        t = clock.now_ns()
         if self.backend is not None:
             self.backend.click(t)
         self.pressed_at.append(t)
-        self.source.push_key(key, t)
+        press(self.source, label, rep, t_ns=t)
 
     def show(self, text):
         if text.startswith("=") and ">>> READY" in text and self.early and self.early(self.n + 1):
-            self._press(KEY_FOR[text.split("target:")[1].split()[0]])
+            self._press(text.split("target:")[1].split()[0])
         if "PRESS" not in text or "too early" in text:
             return
         self.n += 1
         target = text.split("PRESS")[1].split()[0]
+        rep = _Typist.rep_of(text)
         if self.extra:
             self.extra(self.n, self.source)
         delay = self.delay_s(self.n)
         if delay is not None:
-            timer = threading.Timer(delay, self._press, args=(KEY_FOR[target],))
+            timer = threading.Timer(delay, self._press, args=(target, rep))
             self.timers.append(timer)
             timer.start()
 
@@ -191,7 +196,7 @@ def test_key_pressed_before_press_appears_does_not_trigger(tmp_path):
 
 
 @pytest.mark.parametrize("change,match", [
-    ({"input": {"key_detection": "none"}}, "key_detection: terminal"),
+    ({"input": {"key_detection": "none"}}, "key_detection: hook"),
     ({"trial": {"pre_roll_ms": 500, "post_roll_ms": 100, "countdown_ms": 0, "inter_trial_ms": 0}}, "pre_roll_ms"),
     ({"trial": {"post_roll_ms": 0}}, "post_roll_ms"),
 ])
@@ -206,7 +211,7 @@ def test_sample_at_maps_monotonic_time_to_sample_index():
     written = []  # (time just after each block arrived, samples captured by then)
     for _ in range(10):
         buf.write(block, False)
-        written.append((time.monotonic_ns(), buf.total_written))
+        written.append((clock.now_ns(), buf.total_written))
         time.sleep(0.005)
     for t, count in written:
         # at the moment a block has arrived, the index is that block's end
@@ -259,8 +264,14 @@ def test_unlimited_wait_does_not_hide_a_dead_microphone(tmp_path):
     assert rows and rows[-1]["status"] == "interrupted" and rows[-1]["requeue"] == "immediate"
 
 
-def test_hangul_ime_in_keypress_mode_stops_with_the_hint(tmp_path):
-    config = _config(tmp_path, trial={"input_window_ms": 0})
+def test_hangul_ime_in_keypress_mode_stops_with_the_hint(tmp_path, monkeypatch):
+    """Terminal detection only (a hook never sees IME output): a Hangul IME
+    sends jamo characters, which cannot be verified."""
+    from classism.labels import JAMO
+    from experiments.recording import labels as labels_module
+
+    monkeypatch.setattr(labels_module, "load_classes", lambda: (JAMO, "jamo-only-test"))
+    config = _config(tmp_path, trial={"input_window_ms": 0}, input={"key_detection": "terminal"})
     engine = SessionEngine(config, backend=ClickBackend(), mic_test_duration_s=0.2)
     source = QueueControlSource()
 
@@ -286,7 +297,7 @@ def test_key_pressed_the_instant_press_appears_counts(tmp_path):
         def show(self, text):
             if "PRESS" in text and "too early" not in text:
                 self.n += 1
-                source.push_key(KEY_FOR[text.split("PRESS")[1].split()[0]])
+                press(source, text.split("PRESS")[1].split()[0], _Typist.rep_of(text))
                 if self.n == 3:
                     source.push("quit")
 

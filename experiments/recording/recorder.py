@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from . import clock
 from .errors import AudioDeviceError, AudioStreamError
 
 AudioCallback = Callable[[np.ndarray, bool], None]
@@ -234,7 +235,7 @@ class SyntheticBackend(AudioBackend):
 
         def _run():
             idx = 0
-            next_tick = time.monotonic()
+            next_tick = clock.now_s()
             while not self._stop_event.is_set():
                 sample_indices = np.arange(idx, idx + chunk, dtype=np.int64)
                 values = (((sample_indices % 2000) - 1000) * self.amplitude // 1000).astype(np.int16)
@@ -247,7 +248,7 @@ class SyntheticBackend(AudioBackend):
                 # Pace to real time, like a real device, so trial phase
                 # sleeps and captured sample counts stay consistent.
                 next_tick += chunk_period_s
-                delay = next_tick - time.monotonic()
+                delay = next_tick - clock.now_s()
                 if delay > 0:
                     time.sleep(delay)
 
@@ -289,7 +290,7 @@ class RingBuffer:
         self._lock = threading.Lock()
         self.total_written = 0
         self._overflow_events: list = []
-        # (time.monotonic_ns() when a block arrived, total samples by then):
+        # (clock.now_ns() when a block arrived, total samples by then):
         # lets a keypress timestamp be turned into a sample index.
         self._anchors: collections.deque = collections.deque(maxlen=4096)
 
@@ -306,7 +307,7 @@ class RingBuffer:
                 self._buf[pos:] = frames[:first]
                 self._buf[: end_pos - self.capacity] = frames[first:]
             self.total_written += n
-            self._anchors.append((time.monotonic_ns(), self.total_written))
+            self._anchors.append((clock.now_ns(), self.total_written))
             if overflow:
                 self._overflow_events.append(OverflowEvent(start, start + n))
 
