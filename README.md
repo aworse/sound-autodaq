@@ -25,6 +25,7 @@ experiments/recording/     the recorder (this spec's normative subject)
   hardware.py                device probing, mic test, disk estimate
   ui.py                      terminal display + operator controls
   validator.py                read-only dataset validation
+  export_classism.py          session -> classism training data (labels CSV + audio)
   engine.py                   session orchestration
   cli.py, __main__.py         command-line interface
   webui/                       optional browser dashboard (read-only status viewer)
@@ -53,6 +54,9 @@ python -m experiments.recording --list-devices
 
 # validate a recorded dataset (read-only, no hardware needed)
 python -m experiments.recording --validate data/raw/P01/S01/SESSION01
+
+# export a session as classism training data (see "Exporting for classism")
+python -m experiments.recording --export-classism data/raw/P01/S01/SESSION01 --out data/classism
 
 # browser dashboard: live status view of a session directory
 # (read-only, polls the same files the recorder writes; run alongside
@@ -222,6 +226,42 @@ key that is not a jamo key, Space, Backspace, Shift, Caps Lock or an
 operator digit**. The prompt rotates keys so the class covers more than
 one sound. Pressing a different `<other>` key still counts as `<other>`;
 the manifest notes which key it was.
+
+## Exporting for classism (`--export-classism`)
+
+```bash
+python -m experiments.recording --export-classism data/raw/P01/S01/SESSION01 --out data/classism
+```
+
+This writes classism's training layout (`aworse/classism` spec §3.1/§7):
+
+```
+data/classism/labels/P01_S01_SESSION01.csv   one row per valid trial
+data/classism/audio/<clip_id>.wav            that trial's recording (hard link when possible)
+```
+
+| column | value |
+| --- | --- |
+| `onset_s` | keystroke time in the session, in seconds (wall clock, so it survives resumes) |
+| `jamo` `keytype` `shift` | the label as classism reads it: `keytype` is `normal` for jamo, else `space` `backspace` `shift` `caps` `other`; `shift` is 1 for ㄲㄸㅃㅆㅉㅒㅖ and `<shift>` |
+| `scenario` `participant` | from the session; classism splits by session (the CSV name) and by participant |
+| `clip_id` | `<session_uid>_<trial_id>` |
+| `wav_onset_s` `onset_source` `trial_id` `observed_key` | extras classism's loader ignores: where the keystroke is inside the WAV, and whether that came from the keystroke or (without key detection) only the prompt |
+
+- **Only `valid` trials are exported.** An incomplete session exports what
+  it has and says how many trials are still to record. A session that
+  fails validation (missing or orphan audio, drift, …) is refused.
+- **The Mel component does the rest.** It cuts each WAV from 5 ms before
+  `wav_onset_s` to 95 ms after it and writes `mel/<clip_id>.npy`. A trial
+  whose file cannot hold that 100 ms window is skipped with the reason.
+  With keypress capture the keystroke sits exactly `pre_roll_ms` into
+  every file.
+- **Multiple sessions go into one root:** each session gets its own CSV.
+  Re-exporting a session replaces its own CSV and clips and leaves other
+  sessions alone.
+- **Checked against classism's own loader:** a 38-class session exported
+  this way loads through `aworse/classism` `src/dataset.py`
+  `load_samples` with every label index intact.
 
 ## Implementation decisions (spec Appendix E)
 
